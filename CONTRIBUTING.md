@@ -1,32 +1,34 @@
-# Contributing
+# Developing Camp
 
-Thank you for your interest in Raft. Please read this before opening anything.
+Camp is maintained at [rcyw/camp](https://github.com/rcyw/camp), as an independent
+fork of [Raft](https://github.com/botiverse/raft-source).
 
-## Pull requests
+## Working on a change
 
-We are **not accepting pull requests** at the moment. This repository is a
-release mirror: development happens in a private repository and every release
-is published here as a single snapshot commit. A pull request opened here
-cannot be merged, so an automation closes external pull requests with a
-pointer to this file.
+- Start a feature branch from `main` and keep each change focused.
+- Describe the resulting behavior and the validation performed in your commit
+  or pull request.
+- Run checks relevant to the affected packages. For behavior changes, verify
+  the corresponding login, messaging, task or Computer flow.
+- Preserve the existing license and upstream copyright notices.
 
-This may change in the future. If it does, this document and the README will
-say so.
+## Upstream changes
 
-## Issues
+Keep `origin` pointed at `rcyw/camp` and `upstream` pointed at
+`botiverse/raft-source`. Review and integrate upstream updates separately from
+Camp customizations.
 
-GitHub Issues are not enabled on this repository for now. Product feedback and
-support requests go through the in-app feedback tool or the support channels
-listed on raft.build.
+Upstream Raft is a release mirror with its own contribution policy. Camp
+development takes place in this fork.
 
 ## Security
 
-Vulnerabilities must be reported privately. See [SECURITY.md](SECURITY.md)
-for the channels and what to expect. Never post exploit details in a public
+For vulnerabilities affecting upstream Raft, follow its policy retained in
+[SECURITY.md](SECURITY.md). The contacts and support commitments there belong
+to the upstream project. For Camp-specific changes, arrange private reporting
+with the fork maintainer. Never post credentials or exploit details in a public
 issue, pull request or discussion.
 
 ## License of contributions
 
-Because we do not accept contributions today there is no contributor license
-agreement. Code in this repository is licensed under
-[FSL-1.1-ALv2](LICENSE).
+Code in this repository remains licensed under [FSL-1.1-ALv2](LICENSE).

@@ -1,11 +1,29 @@
-# Raft
+# Camp
 
-Raft is a shared workspace where humans and AI agents collaborate as peers.
+**Bring your agents together.**
+
+Camp is a self-hosted workspace where humans and AI agents collaborate across
+machines. Connect your computers, bring runtimes such as Claude Code and Codex,
+and coordinate work through channels, threads, direct messages and tasks.
+
+Camp is an independently maintained fork of
+[Raft](https://github.com/botiverse/raft-source). Development and customizations
+live in [rcyw/camp](https://github.com/rcyw/camp).
+
 Agents are persistent participants with their own identity, memory and
 capability scope; they run as real processes on real machines and take part in
 channels, threads, direct messages and tasks alongside people.
 
-This repository contains the source of the Raft platform:
+## Current focus
+
+- Bring agents on different computers into one shared workspace.
+- Let people and agents discuss, assign, review and hand off work together.
+- Keep deployment under your control and adapt the workflow to your needs.
+
+The inherited commands and package names (`raft`, `raft-computer`, `raftdev`
+and `@botiverse/raft-*`) are retained during initial development.
+
+This repository contains the following components:
 
 | Path | What it is |
 | --- | --- |
@@ -20,7 +38,7 @@ This repository contains the source of the Raft platform:
 
 ## License
 
-Raft is **source available** under the
+This fork retains Raft's **source available** license:
 [Functional Source License, Version 1.1, ALv2 Future License](LICENSE)
 (FSL-1.1-ALv2). In short: you may read, run, modify and use the code for any
 purpose that does not compete with Raft, and each version becomes available
@@ -30,15 +48,17 @@ the authoritative text.
 "Raft" and the Raft logo are trademarks of Botiverse, Inc. and are not covered by
 the license.
 
-## Contributions and history
+## Development and upstream
 
-- This repository is a **release mirror**. Development happens in a private
-  repository; each release is exported here as one commit, and the history
-  starts at the first published snapshot.
-- We do **not** accept pull requests at this time. External pull requests are
-  closed automatically. See [CONTRIBUTING.md](CONTRIBUTING.md).
-- Security issues: see [SECURITY.md](SECURITY.md). Please do not file them
-  publicly.
+- `origin` points to [rcyw/camp](https://github.com/rcyw/camp), where Camp changes
+  are developed.
+- `upstream` points to [botiverse/raft-source](https://github.com/botiverse/raft-source).
+  That repository publishes Raft releases as snapshot commits; its history and
+  original license and copyright notices are preserved in this fork.
+- Keep individual changes on feature branches and validate them before merging
+  into `main`. See [CONTRIBUTING.md](CONTRIBUTING.md).
+- The upstream security policy is retained in [SECURITY.md](SECURITY.md). Its
+  reporting contacts, hosted-service scope and support commitments apply to Raft.
 
 ## Getting started
 
@@ -46,8 +66,8 @@ Prerequisites: Node.js 24.21 (see `.node-version`), pnpm 12.11 (see
 `packageManager` in `package.json`), and Docker for the local stack.
 
 ```sh
-pnpm install
-./raftdev start            # Postgres, Redis, object storage, server, web, daemon
+pnpm install --frozen-lockfile
+./raftdev start --risingwave  # Local stack, server, web, daemon and RisingWave
 ./raftdev --help
 ```
 
@@ -79,4 +99,6 @@ predates the pnpm 12 upgrade still declares pnpm 10 and correctly runs it.
 - Agents never hold server credentials directly: the daemon brokers them
   through a local, origin-bound proxy with a per-launch token.
 
-See `SECURITY.md` for how to report anything that breaks these properties.
+For issues affecting upstream Raft, follow the reporting guidance in
+[SECURITY.md](SECURITY.md). Keep credentials and vulnerability details out of
+public issues and pull requests.
