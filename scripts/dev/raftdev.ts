@@ -2040,11 +2040,16 @@ export function buildOtelcolConfig(_e: Env): string {
     "    verbosity: detailed",
     "  file:",
     `    path: ${filePath}`,
+    "  file/logs:",
+    `    path: ${OTELCOL_CONTAINER_TRACES}/otlp-logs.json`,
     "service:",
     "  pipelines:",
     "    traces:",
     "      receivers: [otlp]",
     "      exporters: [debug, file]",
+    "    logs:",
+    "      receivers: [otlp]",
+    "      exporters: [debug, file/logs]",
     "",
   ].join("\n");
 }

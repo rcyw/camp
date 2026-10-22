@@ -11,7 +11,7 @@
  */
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
-import { eq, and, isNull, desc } from "drizzle-orm";
+import { eq, and, isNull, desc, gt, inArray, sql } from "drizzle-orm";
 import { createHash, randomBytes } from "node:crypto";
 import argon2 from "argon2";
 import * as schema from "../src/db/schema";
@@ -2374,6 +2374,44 @@ async function main() {
       revision: 1,
     }).onConflictDoNothing();
     console.error("Seeded RAP App config: system.reminder");
+
+    // Older task fixtures write the legacy table directly. Mirror the fields
+    // carried by normal task-message writes and consumed by the RW projection.
+    await db.execute(sql`
+      UPDATE messages AS m
+      SET task_number = t.task_number, task_status = t.status,
+          task_assignee_type = t.claimed_by_type, task_assignee_id = t.claimed_by_id,
+          task_claimed_at = t.claimed_at, task_completed_at = t.completed_at
+      FROM tasks AS t
+      WHERE t.message_id = m.id AND t.channel_id = ${channel.id}
+    `);
+
+    // Historical batches are inserted after newer fixtures. Keep the final
+    // message's timestamp aligned with the channel's latest activity time.
+    await db.execute(sql`
+      WITH latest AS (
+        SELECT m.channel_id, MAX(m.seq) AS seq, MAX(m.created_at) AS created_at
+        FROM messages AS m
+        INNER JOIN channels AS c ON c.id = m.channel_id
+        WHERE c.server_id = ${server.id}
+        GROUP BY m.channel_id
+      )
+      UPDATE messages AS m SET created_at = latest.created_at
+      FROM latest
+      WHERE m.channel_id = latest.channel_id AND m.seq = latest.seq
+        AND m.created_at < latest.created_at
+    `);
+
+    // Fixture messages are backdated, while memberships default to insertion
+    // time. Put seeded users' joins before that history, including joint
+    // projections, so RisingWave's joined_at gate retains the fixture rows.
+    const beforeSeedHistory = sql`(SELECT MIN(created_at) - INTERVAL '1 millisecond' FROM messages)`;
+    await db.update(channelHumans)
+      .set({ joinedAt: beforeSeedHistory })
+      .where(and(
+        inArray(channelHumans.userId, [user.id, adminUser.id, memberUser.id, viewerUser.id]),
+        gt(channelHumans.joinedAt, beforeSeedHistory),
+      ));
 
     // Output credentials
     const output = {
