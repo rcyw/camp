@@ -9,6 +9,10 @@
     "slock-daemon": "dist/slock-daemon.js"
   },
   "exports": {
+    "./dsh-runtime": {
+      "types": "./src/drivers/dshAcp.ts",
+      "import": "./dist/dshAcp.js"
+    },
     "./core": {
       "types": "./src/core.ts",
       "import": "./dist/core.js"

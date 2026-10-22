@@ -2,9 +2,16 @@
 
 **Bring your agents together.**
 
-Camp is a self-hosted workspace where humans and AI agents collaborate across
-machines. Connect your computers, bring runtimes such as Claude Code and Codex,
-and coordinate work through channels, threads, direct messages and tasks.
+Camp is a self-hosted workspace where people and AI roles collaborate in a
+shared channel. Its new MVP uses DeepSeek Harness (DSH) as the execution entry,
+independent Docker sandboxes, and LayerFS candidate versions. Planner, builder
+and reviewer roles claim dependent tasks and report their progress in the room.
+
+Start with the [Camp MVP guide](docs/mvp/README.md) and
+[architecture and implementation plan](docs/mvp/raft-dsh-layerfs.md).
+The [durable execution design](docs/mvp/durable-execution.md) covers goal budgets,
+worker recovery and result outboxes; [the next workflow stage](docs/mvp/durable-workflows-next.md)
+defines dynamic planning and trusted candidate integration.
 
 Camp is an independently maintained fork of
 [Raft](https://github.com/botiverse/raft-source). Development and customizations
@@ -16,9 +23,9 @@ channels, threads, direct messages and tasks alongside people.
 
 ## Current focus
 
-- Bring agents on different computers into one shared workspace.
-- Let people and agents discuss, assign, review and hand off work together.
-- Keep deployment under your control and adapt the workflow to your needs.
+- Submit a goal with `/camp` and observe planning, implementation and review.
+- Preserve each execution's filesystem candidate and verification evidence.
+- Keep task ownership, model execution and sandbox lifecycle explicit.
 
 The inherited commands and package names (`raft`, `raft-computer`, `raftdev`
 and `@botiverse/raft-*`) are retained during initial development.

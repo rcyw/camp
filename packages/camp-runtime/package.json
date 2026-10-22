@@ -1,0 +1,13 @@
+{
+  "name": "@camp/runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.mjs",
+  "scripts": {
+    "build:layerfs": "node scripts/build-layerfs.mjs",
+    "build:image": "node scripts/build-image.mjs",
+    "test:real": "node scripts/verify-layerfs.mjs",
+    "worker": "node --import @oxc-node/core/register src/worker.mjs"
+  }
+}

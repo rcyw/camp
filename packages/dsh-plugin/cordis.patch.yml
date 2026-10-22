@@ -1,0 +1,20 @@
+# The Camp controller owns roles, task leases, and platform agents.
+- id: subagent-spawn-in-process
+  disabled: true
+- id: subagent-fork-in-process
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: workflow-ptc
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- insert:
+    - id: camp-room-tools
+      name: '@camp/dsh-plugin'

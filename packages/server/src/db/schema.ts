@@ -2,6 +2,7 @@ import type { ActivityTurnSummary, AnnouncementAudience, AnnouncementAudienceSna
 import { pgTable, text, timestamp, integer, bigint, bigserial, uuid, primaryKey, unique, uniqueIndex, index, json, jsonb, boolean, customType, check, date, foreignKey, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
+import type { CampArtifact, CampProject, CampRoleConfig } from "../services/camp/types";
 import type {
   AgentMigrationHostedImportLimits,
   AgentMigrationHostedImportSummary,
@@ -7699,3 +7700,100 @@ export const raftbenchFindings = pgTable("raftbench_findings", {
   sourceRefs: jsonb("source_refs").$type<Array<{ messageId: string; channelId: string; storageChannelId: string; sourceVersion: string }>>().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, t => [uniqueIndex("idx_raftbench_finding_fingerprint").on(t.serverId, t.revision, t.fingerprint)]);
+
+// Camp adds execution ownership to Raft's existing channel and task identities.
+export const campRooms = pgTable("camp_rooms", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  serverId: uuid("server_id").notNull().references(() => servers.id, { onDelete: "cascade" }),
+  channelId: uuid("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  project: jsonb("project").$type<CampProject>().notNull(),
+  roles: jsonb("roles").$type<CampRoleConfig[]>().notNull(),
+  createdByUserId: uuid("created_by_user_id").notNull().references(() => users.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  reconciledAt: timestamp("reconciled_at", { withTimezone: true }),
+}, t => [uniqueIndex("camp_rooms_channel").on(t.channelId), index("camp_rooms_server").on(t.serverId)]);
+
+export const campGoals = pgTable("camp_goals", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  roomId: uuid("room_id").notNull().references(() => campRooms.id, { onDelete: "cascade" }),
+  title: text("title").notNull(),
+  description: text("description"),
+  roles: jsonb("roles").$type<import("../services/camp/types").CampRole[]>().notNull().default(["planner", "builder", "reviewer"]),
+  initialDependsOn: jsonb("initial_depends_on").$type<string[]>().notNull().default([]),
+  status: text("status", { enum: ["queued", "running", "cancelling", "completed", "cancelled", "needs_attention"] }).notNull().default("queued"),
+  reason: text("reason"),
+  attempt: integer("attempt").notNull().default(1),
+  budget: jsonb("budget").$type<import("../services/camp/types").CampBudget>().notNull().default({ maxRuns: 12, maxReviewRounds: 3, maxDurationSeconds: 1800 }),
+  runCount: integer("run_count").notNull().default(0),
+  reviewRounds: integer("review_rounds").notNull().default(0),
+  attemptHistory: jsonb("attempt_history").$type<import("../services/camp/types").CampGoalAttemptSummary[]>().notNull().default([]),
+  createdByUserId: uuid("created_by_user_id").notNull().references(() => users.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  deadlineAt: timestamp("deadline_at", { withTimezone: true }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+}, t => [index("camp_goals_room_status").on(t.roomId, t.status), check("camp_goals_counts", sql`${t.attempt} > 0 AND ${t.runCount} >= 0 AND ${t.reviewRounds} >= 0`)]);
+
+export const campTasks = pgTable("camp_tasks", {
+  taskId: uuid("task_id").primaryKey().references(() => tasks.id, { onDelete: "cascade" }),
+  roomId: uuid("room_id").notNull().references(() => campRooms.id, { onDelete: "cascade" }),
+  goalId: uuid("goal_id").notNull().references(() => campGoals.id, { onDelete: "cascade" }),
+  goalAttempt: integer("goal_attempt").notNull().default(1),
+  role: text("role", { enum: ["planner", "builder", "reviewer"] }).notNull(),
+  dependsOn: jsonb("depends_on").$type<string[]>().notNull().default([]),
+  status: text("status", { enum: ["queued", "running", "completed", "failed", "cancelled", "blocked"] }).notNull().default("queued"),
+  attempt: integer("attempt").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, t => [index("camp_tasks_room").on(t.roomId, t.status), index("camp_tasks_goal_attempt").on(t.goalId, t.goalAttempt)]);
+
+export const campRuns = pgTable("camp_runs", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  roomId: uuid("room_id").notNull().references(() => campRooms.id, { onDelete: "cascade" }),
+  taskId: uuid("task_id").notNull().references(() => tasks.id, { onDelete: "cascade" }),
+  role: text("role", { enum: ["planner", "builder", "reviewer"] }).notNull(),
+  agentId: uuid("agent_id").notNull().references(() => agents.id),
+  epoch: integer("epoch").notNull(),
+  workerId: text("worker_id").notNull(),
+  claimId: uuid("claim_id"),
+  runTokenHash: text("run_token_hash").notNull(),
+  status: text("status", { enum: ["running", "completed", "failed", "cancelled"] }).notNull().default("running"),
+  leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }).notNull(),
+  heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }).notNull().defaultNow(),
+  cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
+  summary: text("summary"),
+  artifacts: jsonb("artifacts").$type<CampArtifact[]>().notNull().default([]),
+  sessionId: text("session_id"),
+  error: text("error"),
+  outcome: text("outcome"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+}, t => [
+  uniqueIndex("camp_runs_task_epoch").on(t.taskId, t.epoch),
+  uniqueIndex("camp_runs_token").on(t.runTokenHash),
+  index("camp_runs_room_status").on(t.roomId, t.status),
+  uniqueIndex("camp_runs_claim").on(t.roomId, t.claimId),
+]);
+
+export const campWorkerTokens = pgTable("camp_worker_tokens", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  roomId: uuid("room_id").notNull().references(() => campRooms.id, { onDelete: "cascade" }),
+  tokenHash: text("token_hash").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, t => [uniqueIndex("camp_worker_tokens_hash").on(t.tokenHash)]);
+
+export const campEvents = pgTable("camp_events", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  seq: bigserial("seq", { mode: "number" }).notNull(),
+  roomId: uuid("room_id").notNull().references(() => campRooms.id, { onDelete: "cascade" }),
+  goalId: uuid("goal_id").references(() => campGoals.id, { onDelete: "cascade" }),
+  runId: uuid("run_id").references(() => campRuns.id, { onDelete: "cascade" }),
+  type: text("type").notNull(),
+  content: text("content").notNull(),
+  toRole: text("to_role"),
+  artifact: jsonb("artifact").$type<CampArtifact>(),
+  messageId: uuid("message_id").references(() => messages.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, t => [index("camp_events_room_seq").on(t.roomId, t.seq)]);

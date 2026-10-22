@@ -1,7 +1,7 @@
 import { defineConfig } from "tsdown";
 
 export default defineConfig({
-  entry: ["src/index.ts", "src/core.ts", "src/bundledRaftCli.ts", "src/runtimeDetectionChild.ts"],
+  entry: ["src/index.ts", "src/core.ts", "src/bundledRaftCli.ts", "src/runtimeDetectionChild.ts", "src/drivers/dshAcp.ts"],
   format: "esm",
   target: "node20",
   platform: "node",

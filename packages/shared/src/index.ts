@@ -2846,6 +2846,7 @@ export function hasStaticRuntimeModelSource(runtimeId: string): boolean {
 const CLAUDE_REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
 
 export const RUNTIME_MODELS: Record<string, RuntimeModelInfo[]> = {
+  dsh: [{ id: "profile", label: "DSH profile default", verified: "suggestion_only" }],
   [EXTERNAL_AGENT_RUNTIME_ID]: [
     { id: EXTERNAL_AGENT_RUNTIME_MODEL, label: EXTERNAL_AGENT_RUNTIME_DISPLAY_NAME },
   ],

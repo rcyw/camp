@@ -45,6 +45,7 @@ import { billingRouter, stripeWebhookHandler } from "./routes/billing";
 import { resendNewsletterWebhookHandler } from "./routes/newsletterWebhooks";
 import { raftbenchRouter } from "./routes/raftbench";
 import { taskRouter } from "./routes/tasks";
+import { campRouter, campWorkerRouter } from "./routes/camp";
 import { reminderRouter } from "./routes/reminders";
 import { attachmentRouter, attachmentPublicRouter } from "./routes/attachments";
 import { externalAvatarPublicRouter } from "./routes/externalAvatars";
@@ -742,6 +743,8 @@ export function createApp(options: CreateAppOptions = {}): Express {
   app.use("/api/agents", requireAuth, requireVerified, requireServer, agentRouter);
   app.use("/api/billing", requireAuth, requireVerified, requireServer, billingLimiter, billingRouter);
   app.use("/api/tasks", requireAuth, requireVerified, requireServer, taskRouter);
+  app.use("/api/camp/worker", campWorkerRouter);
+  app.use("/api/camp", requireAuth, requireVerified, requireServer, campRouter);
   app.use("/api/reminders", requireAuth, requireVerified, requireServer, reminderRouter);
   // Attachment-comment creation is MESSAGE-shaped traffic, not an upload:
   // it must ride the message limiter (60/min/user, skipped in the pglite

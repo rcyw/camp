@@ -2619,6 +2619,20 @@
       "when": 1792360939359,
       "tag": "0373_raftbench_service_agents",
       "breakpoints": true
+    },
+    {
+      "idx": 374,
+      "version": "7",
+      "when": 1792638000000,
+      "tag": "0374_camp_rooms",
+      "breakpoints": true
+    },
+    {
+      "idx": 375,
+      "version": "7",
+      "when": 1792738000000,
+      "tag": "0375_camp_goals",
+      "breakpoints": true
     }
   ]
 }

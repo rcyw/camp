@@ -50,6 +50,8 @@ import Banner from "../ui/Banner";
 import Tooltip from "../ui/Tooltip";
 import AgentActivityDot from "../agent/AgentActivityDot";
 import api from "../../api/client";
+import { campApi } from "../camp/campApi";
+import { parseCampGoal } from "../camp/campCommand";
 import {
   buildMentionCandidateGroupsFromRankedCandidates,
   createMentionCandidateSearchEntries,
@@ -2089,6 +2091,11 @@ export default function MessageInput({
     const hasContent = content.trim().length > 0;
     const hasFiles = pendingFiles.length > 0;
     if (!hasContent && !hasFiles && !(allowEmptySubmit && onSendOverride)) return;
+    const campGoal = onSendOverride ? null : parseCampGoal(content);
+    if (campGoal !== null && (!campGoal || hasFiles)) {
+      setError(formatMessage({ id: hasFiles ? "camp.commandAttachments" : "camp.commandGoalRequired" }));
+      return;
+    }
     const submitAsTask = alsoCreateTask || options?.forceAsTask === true;
     if (pendingFiles.some((pf) => pf.uploadStatus === "validating")) {
       setError(formatMessage({ id: "message.composer.waitForAttachmentChecks" }));
@@ -2123,7 +2130,9 @@ export default function MessageInput({
     // Stryker restore all
     let deliveryChannelId: string;
     try {
-      deliveryChannelId = await resolveDeliveryChannelId();
+      // Camp addresses the existing room; it must not create a chat thread as a
+      // side effect of the normal composer delivery path.
+      deliveryChannelId = campGoal !== null ? channelId : await resolveDeliveryChannelId();
     } catch (err) {
       submittedDraftIntentRef.current = releaseSubmittedDraftIntent(
         submittedDraftIntentRef.current,
@@ -2209,12 +2218,18 @@ export default function MessageInput({
     // Override path (compact comment composer): the caller owns delivery and
     // list refresh; no optimistic row exists to reconcile. Failure restores
     // the typed content + mentions exactly like the store path below.
-    if (onSendOverride) {
+    if (onSendOverride || campGoal !== null) {
       try {
         await onWillSend?.();
         if (readChannelConversionBlocked(membershipChannelId)) throw new Error(conversionBlockedMessage);
         setError("");
-        await onSendOverride(msg, mentionsToSend);
+        if (campGoal !== null) {
+          const room = await campApi.roomForChannel(channelId);
+          if (!room) throw { response: { data: { error: formatMessage({ id: "camp.commandRoomRequired" }) } } };
+          await campApi.submit(room.id, campGoal.split("\n")[0].slice(0, 160), campGoal);
+        } else {
+          await onSendOverride!(msg, mentionsToSend);
+        }
       } catch (err) {
         submittedDraftIntentRef.current = releaseSubmittedDraftIntent(
           submittedDraftIntentRef.current,

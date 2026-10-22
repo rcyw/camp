@@ -482,6 +482,8 @@ importers:
         specifier: ^4.50.0
         version: 4.88.0(@cloudflare/workers-types@4.20260601.1)(@types/node@25.5.0)
 
+  packages/camp-runtime: {}
+
   packages/cli:
     dependencies:
       ajv:
@@ -670,6 +672,15 @@ importers:
       vitest:
         specifier: ^5.0.3
         version: 5.0.3(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(@vitest/coverage-v8@5.0.3)(jsdom@30.1.2)(vite@8.3.4(@types/node@26.1.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.1))
+
+  packages/dsh-plugin:
+    devDependencies:
+      '@types/node':
+        specifier: ^25.5.0
+        version: 25.5.0
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
 
   packages/raft-event-buffer:
     dependencies:

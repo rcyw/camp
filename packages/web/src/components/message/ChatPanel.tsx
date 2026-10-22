@@ -3,7 +3,7 @@ import CloseButton from "../ui/CloseButton";
 import { createContext, lazy, memo, Suspense, useContext, useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
 import type { ComponentType, ReactNode } from "react";
 import { useIntl } from "react-intl";
-import { LogIn, ArrowLeft, MessageSquare, ListTodo, ArrowDown, Paperclip, BellOff, X } from "lucide-react";
+import { LogIn, ArrowLeft, MessageSquare, ListTodo, ArrowDown, Paperclip, BellOff, X, Workflow } from "lucide-react";
 import {
   Badge,
   ConversationPanelBody,
@@ -88,6 +88,7 @@ import { selectChannelTaskBucket, useTaskStore } from "../../store/taskStore";
 import type { Task } from "../../store/taskStore";
 import TasksPanel from "../task/TasksPanel";
 import ChannelFilesPanel from "./ChannelFilesPanel";
+import CampRoomPanel from "../camp/CampRoomPanel";
 import { getHistoryTopState } from "../../utils/historyTopState";
 import ThreadPanelSystemMessageGroupDisclosure from "./ThreadPanelSystemMessageGroupDisclosure";
 import { buildSystemMessageRenderStates } from "./systemMessageGrouping";
@@ -115,7 +116,7 @@ const ForwardComposerDialog = lazy(() => import("./ForwardComposerDialog"));
 // Stable empty-prop bag for the mobile back button (task #709).
 const CHAT_MOBILE_BACK_PROPS = { "data-testid": "chat-mobile-back" } as const;
 
-type ChatPanelTab = "chat" | "tasks" | "files";
+type ChatPanelTab = "chat" | "tasks" | "files" | "camp";
 
 // The activity-mute error banner persists until dismissed, so store the stable
 // message key (not a formatted string) and resolve it at render time — otherwise
@@ -265,6 +266,7 @@ export default function ChatPanel({
     { id: "chat", icon: MessageSquare, label: formatMessage({ id: "message.chatPanel.tabChat" }) },
     { id: "tasks", icon: ListTodo, label: formatMessage({ id: "message.chatPanel.tabTasks" }) },
     { id: "files", icon: Paperclip, label: formatMessage({ id: "message.chatPanel.tabFiles" }) },
+    { id: "camp", icon: Workflow, label: formatMessage({ id: "camp.tab" }) },
   ], [formatMessage]);
   // Keep locale-bound formatMessage out of effect/handler deps: effects that
   // load activity-mute state or reset selection must NOT re-run on a language
@@ -366,7 +368,7 @@ export default function ChatPanel({
       // boards (stdrc msg=71334a2d 2026-05-27).
       // oxlint-disable-next-line react-doctor/no-event-handler -- YMNNE-family: pre-existing non-bug site grandfathered; rule now gates new code (see docs/frontend/render-cost-contract.md)
       if (channel?.type === "thread") return orderedTabs.filter((tab) => tab.id === "chat");
-      return orderedTabs;
+      return channel?.type === "channel" || channel?.type === "private" ? orderedTabs : orderedTabs.filter(tab => tab.id !== "camp");
     },
     [channel?.type, orderedTabs],
   );
@@ -1600,6 +1602,8 @@ export default function ChatPanel({
       {/* Channel tasks reuse the server-wide board/list surface. */}
       {activeTab === "tasks" ? (
         <ConversationPanelBody className="flex flex-col"><TasksPanel channelId={channel.id} /></ConversationPanelBody>
+      ) : activeTab === "camp" ? (
+        <ConversationPanelBody className="flex flex-col"><CampRoomPanel key={channel.id} channel={channel} /></ConversationPanelBody>
       ) : activeTab === "files" ? (
         <ConversationPanelBody className="flex flex-col"><ChannelFilesPanel channel={channel} /></ConversationPanelBody>
       ) : (

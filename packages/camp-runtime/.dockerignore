@@ -1,0 +1,9 @@
+**
+!Dockerfile
+!Dockerfile.dsh
+!.local/
+!.local/node
+!.local/dsh-runtime.tar
+!.local/dsh-plugin.tar
+!.local/toolchain/
+!.local/toolchain/**

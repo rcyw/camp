@@ -1,0 +1,11 @@
+{
+  "name": "@camp/dsh-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "exports": { ".": "./src/index.js" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "scripts": { "test": "node --test test/*.test.mjs", "typecheck": "tsc -p tsconfig.json" },
+  "devDependencies": { "@types/node": "^25.5.0", "typescript": "^6.0.3" }
+}

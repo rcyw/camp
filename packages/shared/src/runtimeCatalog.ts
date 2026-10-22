@@ -49,6 +49,7 @@ export const RUNTIMES: RuntimeInfo[] = [
   { id: "gemini", displayName: "Gemini CLI", abbreviation: "GM", binary: "gemini", supported: true, deprecated: true },
   { id: "opencode", displayName: "OpenCode", abbreviation: "OC", binary: "opencode", supported: true },
   { id: "pi", displayName: "Pi", abbreviation: "PI", binary: "pi", supported: true },
+  { id: "dsh", displayName: "DeepSeek Harness", abbreviation: "DS", binary: "dsh", supported: true },
 ];
 
 /**

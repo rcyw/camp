@@ -10,6 +10,7 @@ import { KimiDriver } from "./kimi";
 import { KimiSdkDriver } from "./kimi-sdk";
 import { OpenCodeDriver } from "./opencode";
 import { BuiltInDriver, PiDriver } from "./pi";
+import { DshDriver } from "./dsh";
 
 export type {
   RuntimeDriver,
@@ -48,6 +49,7 @@ export { resolveClaudeCommand } from "./claude";
 export { buildCodexAppServerArgs, parseCodexJsonRpcLine, resolveCodexSpawn } from "./codex";
 
 const driverFactories: Record<string, () => RuntimeDriver> = {
+  dsh: () => new DshDriver(),
   builtin: () => new BuiltInDriver(),
   claude: () => new ClaudeDriver(),
   codex: () => new CodexDriver(),

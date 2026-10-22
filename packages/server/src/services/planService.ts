@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { eq, and, isNull, sql, inArray, ne } from "drizzle-orm";
 import { getDb, type DatabaseExecutor, type DatabaseTransaction } from "../db/index";
 import { isChannelReadOnlyByJointLimit } from "./jointChannelLimitState";
-import { servers, agents, machines, channels, channelHumans, serverMembers, subscriptions } from "../db/schema";
+import { servers, agents, machines, channels, channelHumans, serverMembers, subscriptions, campRooms } from "../db/schema";
 import {
   PLAN_CONFIG,
   canUseProBillingFeatures,
@@ -174,6 +174,10 @@ export async function getServerBillingUsage(
       eq(agents.serverId, serverId),
       isNull(agents.deletedAt),
       isNull(agents.managedByAppInstallId),
+      // Camp's server-bound external roles allocate no hosted engine or seat.
+      // The room binding is persisted by the administrator-only create path.
+      sql`NOT EXISTS (SELECT 1 FROM ${campRooms} WHERE ${campRooms.serverId} = ${agents.serverId}
+        AND ${campRooms.roles} @> jsonb_build_array(jsonb_build_object('agentId', ${agents.id}::text)))`,
     ));
   return getBillingUsage(humanRow?.count ?? 0, agentRow?.count ?? 0);
 }

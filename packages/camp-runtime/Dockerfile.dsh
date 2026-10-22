@@ -1,0 +1,12 @@
+ARG BASE_IMAGE=camp-mvp-runtime:local
+FROM ${BASE_IMAGE}
+COPY .local/toolchain/ /
+COPY .local/dsh-runtime.tar /tmp/camp-dsh.tar
+COPY .local/dsh-plugin.tar /tmp/camp-plugin.tar
+RUN tar -xf /tmp/camp-dsh.tar -C /opt/camp-dsh \
+    && mkdir -p /opt/camp-dsh-plugin \
+    && tar -xf /tmp/camp-plugin.tar -C /opt/camp-dsh-plugin \
+    && rm /tmp/camp-dsh.tar /tmp/camp-plugin.tar \
+    && node --version && npm --version && git --version \
+    && node /opt/camp-dsh/node_modules/@deepseek-ai/dsh/lib/bin.js --version
+LABEL camp.runtime.dsh="0.2.1-rc.2"

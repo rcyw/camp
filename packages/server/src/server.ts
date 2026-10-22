@@ -1,4 +1,5 @@
 import { startRaftbenchWorker } from "./raftbench/worker";
+import { startCampReconciler } from "./services/camp/reconcile";
 import { getChannelConversionAudienceCutover, applyChannelConversionAudienceRealtimeCutover } from "./services/channelConversionService";
 import { startChannelConversionWorker } from "./services/channelConversionWorker";
 import { emitChannelConversionCompletion, emitChannelConversionState, emitJointLimitStateChange } from "./routes/channels";
@@ -374,6 +375,9 @@ async function bootstrap() {
   const appNotificationDeliveryWorker = startAppNotificationDeliveryWorker({ tracer: serverTracer.tracer });
   const agentInboxPushWorker = startAgentInboxPushWorker({ agentOrchestrator, tracer: serverTracer.tracer });
   const raftbenchWorker = startRaftbenchWorker(agentOrchestrator);
+  const campReconciler = startCampReconciler(async room => {
+    io.to(`channel:${room.channelId}`).emit("camp:updated", { roomId: room.id });
+  });
   const assistantDoorbellWorker = startAssistantDoorbellWorker({ agentOrchestrator });
   const computerOutageNotificationWorker = startComputerOutageNotificationWorker();
   const agentMigrationReceiptOutboxWorker = startAgentMigrationReceiptOutboxWorker({
@@ -533,6 +537,7 @@ async function bootstrap() {
     appNotificationDeliveryWorker.stop();
     agentInboxPushWorker.stop();
     raftbenchWorker.stop();
+    campReconciler.stop();
     assistantDoorbellWorker.stop();
     computerOutageNotificationWorker.stop();
     agentMigrationReceiptOutboxWorker.stop();

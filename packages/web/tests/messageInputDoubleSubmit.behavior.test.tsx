@@ -2692,3 +2692,57 @@ test("ordinary channel switches still clear structured mention payloads", async 
   await waitFor(() => assert.equal(sendMessage.details.length, 1));
   assert.deepEqual(sendMessage.details[0]!.mentions, []);
 });
+
+test("Camp goal failure restores the complete draft and permits an explicit retry without ordinary chat delivery", async () => {
+  const sendMessage = makeSendSpy();
+  let attempts = 0;
+  api.post = (async (url: string) => {
+    assert.equal(url, "/camp/rooms/room-camp/tasks");
+    attempts += 1;
+    if (attempts === 1) throw { response: { data: { error: "Worker unavailable" } } };
+    return { data: {} };
+  }) as typeof api.post;
+  const { textarea, form } = setupComposer(sendMessage, {}, {
+    apiGet: (async (url: string) => ({ data: url === "/camp/rooms"
+      ? { rooms: [{ id: "room-camp", channelId: CHANNEL_ID }] }
+      : { agents: [], humans: [] } })) as typeof api.get,
+  });
+  const goal = "/camp Fix the build\nPreserve the public API.";
+  fireEvent.change(textarea, { target: { value: goal } });
+  await submitForm(form);
+  await waitFor(() => assert.equal(textarea.value, goal));
+  assert.ok(screen.getByText("Worker unavailable"));
+  assert.deepEqual(sendMessage.calls, []);
+  await submitForm(form);
+  await waitFor(() => assert.equal(attempts, 2));
+  assert.equal(textarea.value, "");
+  assert.deepEqual(sendMessage.calls, []);
+});
+
+test("Camp requires an existing room and does not create a chat thread while resolving a failed command", async () => {
+  const sendMessage = makeSendSpy();
+  let threadCreations = 0;
+  const { textarea, form } = setupComposer(sendMessage, {
+    resolveChannelId: async () => { threadCreations += 1; return "new-thread"; },
+  }, {
+    apiGet: (async (url: string) => ({ data: url === "/camp/rooms" ? { rooms: [] } : { agents: [], humans: [] } })) as typeof api.get,
+  });
+  fireEvent.change(textarea, { target: { value: "/camp Inspect the module" } });
+  await submitForm(form);
+  await waitFor(() => assert.equal(textarea.value, "/camp Inspect the module"));
+  assert.equal(threadCreations, 0);
+  assert.deepEqual(sendMessage.calls, []);
+});
+
+test("ordinary channel conversation never calls the Camp task API", async () => {
+  const sendMessage = makeSendSpy();
+  let campRequests = 0;
+  api.post = (async (url: string) => { if (url.startsWith("/camp/")) campRequests += 1; return { data: {} }; }) as typeof api.post;
+  const { textarea, form } = setupComposer(sendMessage);
+  const message = "Please explain /camp and @planner roles";
+  fireEvent.change(textarea, { target: { value: message } });
+  await submitForm(form);
+  await waitFor(() => assert.equal(sendMessage.calls.length, 1));
+  assert.equal(sendMessage.calls[0]!.content, message);
+  assert.equal(campRequests, 0);
+});

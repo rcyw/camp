@@ -366,7 +366,7 @@ function normalizeSectionPlacements(value: unknown): serverService.SidebarSectio
 }
 
 const SIDEBAR_SORT_MODES = new Set(["manual", "recent", "az"]);
-const CHANNEL_PANEL_TAB_IDS = new Set(["chat", "tasks", "files"]);
+const CHANNEL_PANEL_TAB_IDS = new Set(["chat", "tasks", "files", "camp"]);
 const AGENT_PANEL_TAB_IDS = new Set(["profile", "chat", "dms", "reminders", "workspace", "integrations", "mcp", "activity"]);
 type ServerMemberProfile = NonNullable<Awaited<ReturnType<typeof serverService.getServerMemberProfile>>>;
 type ChannelScopedHumanProfile = Pick<ServerMemberProfile, "userId" | "name" | "displayName" | "description" | "avatarUrl"> & {
