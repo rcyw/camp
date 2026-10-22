@@ -67,13 +67,25 @@ Prerequisites: Node.js 24.21 (see `.node-version`), pnpm 12.11 (see
 
 ```sh
 pnpm install --frozen-lockfile
-./raftdev start --risingwave  # Local stack, server, web, daemon and RisingWave
+SLOCKDEV_TUNNEL=0 SLOCKDEV_IDLE_TTL_SECONDS=0 ./raftdev start camp --risingwave
+./raftdev ports camp
 ./raftdev --help
 ```
 
 `raftdev` seeds a local workspace and prints the login and ports. Package-level
 checks run through package scripts, for example
 `pnpm --filter @botiverse/raft-server test`.
+
+The command above starts the `camp` development environment with RisingWave,
+keeps the public preview tunnel disabled, and disables automatic idle cleanup.
+The web client runs with hot reload at `http://localhost:15190`; the API uses
+port `13018`. When developing on a remote host, forward web port `15190` to
+your computer. Use `./raftdev logs camp` to attach to the service logs.
+
+Development data is disposable: `./raftdev stop camp` removes the environment's
+containers, object-storage volume and seed state. The next start creates and
+seeds a new environment. Use that command when intentionally resetting the
+local environment.
 
 `pnpm --version` inside the repository must print the version declared in
 `packageManager`. Check the printed version, not whether the command runs:
