@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { open, mkdir, writeFile, readFile, lstat, rm } from 'node:fs/promises';
+import { open, mkdir, readFile, lstat, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -35,6 +35,17 @@ export async function loadVerificationHarnesses(env = process.env) {
     result.push({ id: item.id, path: item.path, sha256: createHash('sha256').update(bytes).digest('hex') });
   }
   return result;
+}
+
+/** The host attempt stays private, while the read-only file bind must remain
+ * readable by sandbox UID 501 even under a service's restrictive umask. */
+export async function stageVerificationHarness(path, bytes) {
+  const file = await open(path, 'wx', 0o600);
+  try {
+    await file.writeFile(bytes);
+    await file.chmod(0o444);
+    await file.sync();
+  } finally { await file.close(); }
 }
 const hostEnv = () => ({ PATH: process.env.PATH, LANG: 'C.UTF-8' });
 function processExit(child) {
@@ -157,7 +168,7 @@ export async function runTrustedVerification({ runtime, ownerRun, candidate, ver
       const bytes = await boundedFile(installed.path, 1024 * 1024);
       if (createHash('sha256').update(bytes).digest('hex') !== requirement.sha256) throw new Error(`Trusted harness changed after negotiation: ${requirement.id}`);
       const copy = join(ownerRun.folder, `harness-${requirement.id}`);
-      await writeFile(copy, bytes, { flag: 'wx', mode: 0o444 });
+      await stageVerificationHarness(copy, bytes);
       if (/[\r\n,]/.test(copy)) throw new Error('Harness mount path contains unsupported separator characters');
       binds.set(requirement.id, ['--mount', `type=bind,source=${copy},target=/camp-checks/${requirement.id},readonly`]);
     }

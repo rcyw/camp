@@ -2,16 +2,57 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { mkdtemp, writeFile, symlink, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, stat, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { boundedVerificationReport, executeVerificationCheck, loadVerificationHarnesses } from '../src/verification.mjs';
+import { boundedVerificationReport, executeVerificationCheck, loadVerificationHarnesses, stageVerificationHarness } from '../src/verification.mjs';
 import { negotiateWorker } from '../src/worker-protocol.mjs';
 import { serverProtocol, CAMP_AGENT_TASK_KINDS, CAMP_CAPABILITIES_V1, CAMP_VERIFICATION_LIMITS, parseVerificationReport } from '../../camp-protocol/src/index.js';
 const execute = promisify(execFile);
+
+test('staged harness explicitly preserves nonroot readability under service umask 0077 without exposing the attempt directory', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'camp-harness-mode-')), source = join(home, 'source'), copy = join(home, 'harness-core');
+  const bytes = Buffer.from('process.exit(0);\n');
+  try {
+    await writeFile(source, bytes, { mode: 0o400 });
+    const previous = process.umask(0o077);
+    try { await stageVerificationHarness(copy, await readFile(source)); }
+    finally { process.umask(previous); }
+    assert.deepEqual(await readFile(copy), bytes);
+    assert.equal((await stat(copy)).mode & 0o777, 0o444);
+    assert.equal((await stat(copy)).uid, process.getuid());
+    assert.equal((await stat(source)).mode & 0o777, 0o400, 'Staging never changes the operator source harness');
+    assert.equal((await stat(home)).mode & 0o777, 0o700, 'Only the individual read-only file bind crosses the private host ancestry');
+    await assert.rejects(stageVerificationHarness(copy, Buffer.from('overwrite')), { code: 'EEXIST' });
+    const linked = join(home, 'linked'); await symlink(source, linked);
+    await assert.rejects(stageVerificationHarness(linked, Buffer.from('overwrite')), { code: 'EEXIST' });
+    assert.deepEqual(await readFile(source), bytes);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('real UID 501 reads the staged file through a read-only Docker bind while the legacy umask result is denied', { skip: !process.env.CAMP_VERIFICATION_REAL_IMAGE }, async () => {
+  const image = process.env.CAMP_VERIFICATION_REAL_IMAGE;
+  assert.match(image, /^sha256:[a-f0-9]{64}$/);
+  const home = await mkdtemp(join(tmpdir(), 'camp-harness-bind-')), fixed = join(home, 'fixed'), legacy = join(home, 'legacy');
+  const name = `camp-harness-umask-${randomUUID().slice(0, 12)}`, bytes = Buffer.from('operator frozen harness\n');
+  try {
+    const previous = process.umask(0o077);
+    try { await writeFile(legacy, bytes, { flag: 'wx', mode: 0o444 }); await stageVerificationHarness(fixed, bytes); }
+    finally { process.umask(previous); }
+    assert.equal((await stat(home)).mode & 0o777, 0o700);
+    assert.equal((await stat(legacy)).mode & 0o777, 0o400);
+    const script = "import assert from 'node:assert/strict';import{readFile,writeFile}from'node:fs/promises';assert.equal(process.getuid(),501);assert.equal(process.getgid(),20);assert.equal(await readFile('/camp-checks/fixed','utf8'),'operator frozen harness\\n');await assert.rejects(readFile('/camp-checks/legacy'),{code:'EACCES'});await assert.rejects(writeFile('/camp-checks/fixed','changed'),error=>['EROFS','EACCES'].includes(error.code));process.stdout.write('uid501-readonly-ok');";
+    const result = await execute('docker', ['run', '--rm', '--pull=never', '--name', name, '--network', 'none', '--read-only', '--user', '501:20', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '32', '--memory', '134217728', '--cpus', '0.5', '--mount', `type=bind,source=${fixed},target=/camp-checks/fixed,readonly`, '--mount', `type=bind,source=${legacy},target=/camp-checks/legacy,readonly`, '--entrypoint', '/usr/local/bin/node', image, '--input-type=module', '-e', script], { timeout: 15000, maxBuffer: 65536 });
+    assert.equal(result.stdout, 'uid501-readonly-ok');
+    assert.deepEqual(await readFile(fixed), bytes);
+  } finally {
+    await execute('docker', ['rm', '--force', name], { timeout: 5000 }).catch(error => { if (!/No such container/i.test(error.stderr ?? '')) throw error; });
+    await rm(home, { recursive: true, force: true });
+  }
+});
 
 test('five observed checks survive aggregate JSON log expansion without losing exit facts', () => {
   const candidate = { type: 'layerfs', projectId: `p-${'a'.repeat(16)}`, imageId: `sha256:${'b'.repeat(64)}`, refKind: 'commit', refId: `12${'c'.repeat(64)}`, commitId: `12${'c'.repeat(64)}`, rootId: 'd'.repeat(64) };
