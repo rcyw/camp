@@ -8,11 +8,36 @@ import { createServer } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { startWorker } from '../src/worker.mjs';
 import { WorkerJournal } from '../src/durable-state.mjs';
-import { assertClaimCompatibility, selectWorkerDeclaration } from '../src/worker-protocol.mjs';
+import { assertClaimCompatibility, selectWorkerDeclaration, negotiateWorker } from '../src/worker-protocol.mjs';
 import { checkedRunPolicy } from '../src/run-policy.mjs';
-import { CAMP_PREFLIGHT_CHECK_IDS, createWorkerDeclaration, serverProtocol, getTaskRequirements } from '../../camp-protocol/src/index.js';
+import { CAMP_PREFLIGHT_CHECK_IDS, CAMP_CAPABILITIES_V1, CAMP_CAPABILITIES_V4, createWorkerDeclaration, serverProtocol, getTaskRequirements, checkWorkerCompatibility } from '../../camp-protocol/src/index.js';
 
 const compatibility = { status: 'compatible', code: 'compatible', protocolVersion: 1, missingTaskKinds: [], missingRefKinds: [], missingCapabilities: [] };
+const executionPool = () => ({ poolId: randomUUID(), storageId: 'a'.repeat(64), maxParallel: 2, workerIds: ['dag-lane-1', 'dag-lane-2'], resources: { maxContainers: 4, cpuMillis: 8000, memoryBytes: 8 * 1024 ** 3, pidsLimit: 1024 } });
+test('only a coordinated pool offers v5 DAG authority, with correct v4 and standalone capability fallback', () => {
+  const server = serverProtocol(), pool = executionPool();
+  const model = selectWorkerDeclaration(server, { executionPool: pool });
+  assert.equal(model.version, 5); assert(model.protocol.capabilities.includes('structured-plan.v2')); assert(model.protocol.capabilities.includes('bounded-dag.v1'));
+  const verifier = selectWorkerDeclaration(server, { executionPool: pool, hasModel: false });
+  assert.equal(verifier.version, 5); assert(verifier.protocol.capabilities.includes('bounded-dag.v1')); assert(!verifier.protocol.capabilities.includes('structured-plan.v2'));
+  assert.equal(checkWorkerCompatibility(verifier.protocol, getTaskRequirements({ protocolVersion: 5, workflow: 'serial', taskKind: 'integration', inputCandidate: null })).status, 'compatible');
+  const old = { ...server, supportedProtocolVersions: [1, 2, 3, 4], capabilities: [...CAMP_CAPABILITIES_V4] };
+  const fallback = selectWorkerDeclaration(old, { executionPool: pool });
+  assert.equal(fallback.version, 4); assert(!fallback.protocol.capabilities.includes('structured-plan.v2')); assert(!fallback.protocol.capabilities.includes('bounded-dag.v1'));
+  assert.equal(checkWorkerCompatibility(fallback.protocol, getTaskRequirements({ protocolVersion: 5, workflow: 'serial', taskKind: 'build', inputCandidate: null })).status, 'incompatible');
+  const standalone = selectWorkerDeclaration(server);
+  assert.equal(standalone.version, 3); assert(!standalone.protocol.protocolVersions.includes(5)); assert(!standalone.protocol.capabilities.includes('structured-plan.v2')); assert(!standalone.protocol.capabilities.includes('bounded-dag.v1'));
+});
+test('an integration claim cannot switch between the v1 and v2 algorithm after protocol negotiation', () => {
+  const pool = executionPool(), offered = selectWorkerDeclaration(serverProtocol(), { executionPool: pool }).protocol;
+  for (const version of [4, 5]) {
+    const requirements = getTaskRequirements({ protocolVersion: version, workflow: 'serial', taskKind: 'integration', inputCandidate: null });
+    const value = { compatibility: checkWorkerCompatibility(offered, requirements) };
+    const claim = { executor: 'integration', taskKind: 'integration', workflow: 'serial', protocolVersion: version, inputCandidate: null, integrationInput: { algorithm: version === 5 ? 'layerfs-three-way-v2' : 'layerfs-three-way-v1' }, workerProtocol: { version, declaration: offered, requirements } };
+    assert.doesNotThrow(() => assertClaimCompatibility(value, claim, offered));
+    assert.throws(() => assertClaimCompatibility(value, { ...claim, integrationInput: { algorithm: version === 5 ? 'layerfs-three-way-v1' : 'layerfs-three-way-v2' } }, offered), /integration algorithm/);
+  }
+});
 async function fixture() {
   const home = await mkdtemp(join(tmpdir(), 'camp-protocol-worker-'));
   const workerId = `protocol-test-${randomUUID()}`;
@@ -39,6 +64,45 @@ async function fixture() {
   f.close = async () => rm(home, { recursive: true, force: true });
   return f;
 }
+test('actual old plugin and new server negotiate only v1–v4 and reject DAG without allocation, including default preflight', async () => {
+  const f = await fixture(), pool = executionPool(), versions = []; let allocated = 0;
+  pool.workerIds = [f.env.CAMP_WORKER_ID, 'other-old-plugin-lane'];
+  const old = { ...createWorkerDeclaration(), protocolVersions: [1, 2, 3, 4], capabilities: [...CAMP_CAPABILITIES_V4] };
+  const pluginPath = join(f.home, 'original-installed-plugin'); await mkdir(pluginPath); await writeFile(join(pluginPath, 'protocol.json'), JSON.stringify(old)); f.env.CAMP_DSH_PLUGIN = pluginPath;
+  try {
+    const negotiated = await negotiateWorker({ request: f.request, env: f.env, pluginPath, executionPool: pool });
+    assert.deepEqual(negotiated.protocol.protocolVersions, [1, 2, 3, 4]); assert(!negotiated.protocol.capabilities.includes('bounded-dag.v1'));
+    assert.equal(checkWorkerCompatibility(negotiated.protocol, getTaskRequirements({ protocolVersion: 4, workflow: 'serial', taskKind: 'build', inputCandidate: null })).status, 'compatible');
+    const request = async (path, body) => {
+      if (path === '/setup') return { roomId: randomUUID(), project: { name: 'old-deployment' }, projectDigest: 'a'.repeat(64) };
+      if (path === '/preflight') return { accepted: true };
+      if (path === '/claim') {
+        f.claims.push(body); assert.deepEqual(body.protocol.protocolVersions, [1, 2, 3, 4]);
+        const requirements = getTaskRequirements({ protocolVersion: 5, workflow: 'serial', taskKind: 'build', inputCandidate: null });
+        const compatibility = checkWorkerCompatibility(body.protocol, requirements);
+        if (compatibility.status === 'compatible') allocated++;
+        return { run: null, compatibility, requirements };
+      }
+      return f.request(path, body);
+    };
+    const preflightChecks = async ({ protocolVersion }) => {
+      versions.push(protocolVersion);
+      return { checks: CAMP_PREFLIGHT_CHECK_IDS.filter(id => !['api', 'resource_policy', 'model'].includes(id)).map(id => ({ id, status: 'passed', code: 'available' })), toolchainDigest: 'b'.repeat(64), imageId: 'sha256:' + 'c'.repeat(64) };
+    };
+    await assert.rejects(startWorker({ ...f, request, executionPool: pool, admitExecution: undefined, preflightChecks }), { code: 'protocol_unsupported' });
+    assert.deepEqual(versions, [4]); assert.equal(allocated, 0); assert.equal(f.sessions, 0); assert.equal(f.claims.length, 1);
+    assert.equal(await f.journal.pendingClaim(), null);
+  } finally { await f.close(); }
+});
+test('v1 plugin compatibility remains explicit and missing baseline capabilities cannot cause a silent downgrade', async () => {
+  const plugin = { ...createWorkerDeclaration(), protocolVersions: [1], capabilities: [...CAMP_CAPABILITIES_V1] };
+  const oldServer = { ...serverProtocol(), supportedProtocolVersions: [1], capabilities: [...CAMP_CAPABILITIES_V1] };
+  assert.equal(selectWorkerDeclaration(oldServer, { plugin }).version, 1);
+  const versionTwoOnly = selectWorkerDeclaration(serverProtocol(), { plugin: { ...createWorkerDeclaration(), protocolVersions: [2] } });
+  assert.equal(versionTwoOnly.version, 2);
+  assert.deepEqual(versionTwoOnly.protocol.protocolVersions, [2]);
+  assert.throws(() => selectWorkerDeclaration(serverProtocol(), { plugin: { ...createWorkerDeclaration(), capabilities: createWorkerDeclaration().capabilities.filter(value => value !== 'dsh.acp.v1') } }), { code: 'capability_missing' });
+});
 test('invalid API URL configurations fail before runtime, journal, logging, signals or requests', async () => {
   const home = await mkdtemp(join(tmpdir(), 'camp-invalid-api-'));
   try {

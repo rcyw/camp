@@ -7744,6 +7744,22 @@ export const campStorageOperations = pgTable("camp_storage_operations", {
   check("camp_storage_operations_phase", sql`(${t.kind} = 'backup' AND ${t.phase} IN ('prepared','completed','cancelled')) OR (${t.kind} = 'migration' AND ${t.phase} IN ('prepared','backup_ready','restore_ready','activated','cancelled'))`),
   check("camp_storage_operations_receipts", sql`${t.phase} = 'cancelled' OR (${t.phase} = 'prepared' AND ${t.backupReceipt} IS NULL AND ${t.restoreReceipt} IS NULL) OR (${t.phase} IN ('completed','backup_ready') AND ${t.backupReceipt} IS NOT NULL AND ${t.restoreReceipt} IS NULL) OR (${t.phase} IN ('restore_ready','activated') AND ${t.backupReceipt} IS NOT NULL AND ${t.restoreReceipt} IS NOT NULL)`)]);
 
+export const campPrivateArtifacts = pgTable("camp_private_artifacts", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  roomId: uuid("room_id").notNull().references(() => campRooms.id, { onDelete: "cascade" }),
+  operationId: uuid("operation_id").notNull().references(() => campStorageOperations.id, { onDelete: "cascade" }),
+  manifest: jsonb("manifest").$type<import("../../../camp-protocol/src/index.js").CampPrivateArtifactManifest>().notNull(),
+  manifestDigest: text("manifest_digest").notNull(),
+  bytes: bigint("bytes", { mode: "number" }).notNull(),
+  state: text("state", { enum: ["uploading", "ready"] }).notNull().default("uploading"),
+  parts: jsonb("parts").$type<Record<string, string>>().notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  sealedAt: timestamp("sealed_at", { withTimezone: true }),
+}, t => [uniqueIndex("camp_private_artifacts_operation").on(t.roomId, t.operationId), index("camp_private_artifacts_room").on(t.roomId, t.state),
+  check("camp_private_artifacts_digest", sql`${t.manifestDigest} ~ '^[a-f0-9]{64}$'`),
+  check("camp_private_artifacts_budget", sql`${t.bytes} > 0 AND ${t.bytes} <= 17189371904 AND octet_length(${t.manifest}::text) <= 524288 AND octet_length(${t.parts}::text) <= 524288`),
+  check("camp_private_artifacts_state", sql`(${t.state} = 'uploading' AND ${t.sealedAt} IS NULL) OR (${t.state} = 'ready' AND ${t.sealedAt} IS NOT NULL)`)]);
+
 export const campGoals = pgTable("camp_goals", {
   id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
   roomId: uuid("room_id").notNull().references(() => campRooms.id, { onDelete: "cascade" }),
@@ -7753,9 +7769,10 @@ export const campGoals = pgTable("camp_goals", {
   initialDependsOn: jsonb("initial_depends_on").$type<string[]>().notNull().default([]),
   workflow: text("workflow", { enum: ["legacy", "serial"] }).notNull().default("legacy"),
   protocolVersion: integer("protocol_version"),
-  planMode: text("plan_mode", { enum: ["sequential", "same_baseline_pair", "parallel_pair"] }).notNull().default("sequential"),
+  planMode: text("plan_mode", { enum: ["sequential", "same_baseline_pair", "parallel_pair", "bounded_dag"] }).notNull().default("sequential"),
   executionPool: jsonb("execution_pool").$type<import("../../../camp-protocol/src/index.js").CampExecutionPool>(),
   integrationInspectionRequired: boolean("integration_inspection_required").notNull().default(false),
+  dagDelivery: jsonb("dag_delivery").$type<import("../services/camp/dagTypes").DagDelivery>(),
   reviewedItems: jsonb("reviewed_items").$type<Record<string, import("../services/camp/types").CampReviewedItem>>().notNull().default({}),
   verificationPolicy: jsonb("verification_policy").$type<import("../services/camp/types").CampVerificationPolicySnapshot>(),
   verificationRepairs: integer("verification_repairs").notNull().default(0),
@@ -7777,7 +7794,7 @@ export const campGoals = pgTable("camp_goals", {
   startedAt: timestamp("started_at", { withTimezone: true }),
   deadlineAt: timestamp("deadline_at", { withTimezone: true }),
   completedAt: timestamp("completed_at", { withTimezone: true }),
-}, t => [index("camp_goals_room_status").on(t.roomId, t.status), check("camp_goals_counts", sql`${t.attempt} > 0 AND ${t.runCount} >= 0 AND ${t.reviewRounds} >= 0`), check("camp_goals_protocol_version_positive", sql`${t.protocolVersion} IS NULL OR ${t.protocolVersion} > 0`), check("camp_goals_verification_repairs_nonnegative", sql`${t.verificationRepairs} >= 0`), check("camp_goals_integration_inspection_pair", sql`NOT ${t.integrationInspectionRequired} OR ${t.planMode} IN ('same_baseline_pair','parallel_pair')`), check("camp_goals_plan_mode", sql`${t.planMode} IN ('sequential','same_baseline_pair','parallel_pair') AND (${t.planMode} <> 'same_baseline_pair' OR (${t.workflow} = 'serial' AND ${t.protocolVersion} = 3)) AND (${t.planMode} <> 'parallel_pair' OR (${t.workflow} = 'serial' AND ${t.protocolVersion} = 4)) AND (${t.protocolVersion} IS DISTINCT FROM 3 OR ${t.planMode} = 'same_baseline_pair') AND (${t.protocolVersion} IS DISTINCT FROM 4 OR ${t.planMode} = 'parallel_pair')`), check("camp_goals_execution_pool", sql`${t.executionPool} IS NULL OR (${t.protocolVersion} = 4 AND jsonb_typeof(${t.executionPool}) = 'object' AND octet_length(${t.executionPool}::text) <= 8192)`), check("camp_goals_reviewed_items", sql`jsonb_typeof(${t.reviewedItems}) = 'object' AND octet_length(${t.reviewedItems}::text) <= 65536`)]);
+}, t => [index("camp_goals_room_status").on(t.roomId, t.status), check("camp_goals_counts", sql`${t.attempt} > 0 AND ${t.runCount} >= 0 AND ${t.reviewRounds} >= 0`), check("camp_goals_protocol_version_positive", sql`${t.protocolVersion} IS NULL OR ${t.protocolVersion} > 0`), check("camp_goals_verification_repairs_nonnegative", sql`${t.verificationRepairs} >= 0`), check("camp_goals_integration_inspection_pair", sql`NOT ${t.integrationInspectionRequired} OR ${t.planMode} IN ('same_baseline_pair','parallel_pair','bounded_dag')`), check("camp_goals_plan_mode", sql`${t.planMode} IN ('sequential','same_baseline_pair','parallel_pair','bounded_dag') AND (${t.planMode} <> 'same_baseline_pair' OR (${t.workflow} = 'serial' AND ${t.protocolVersion} = 3)) AND (${t.planMode} <> 'parallel_pair' OR (${t.workflow} = 'serial' AND ${t.protocolVersion} = 4)) AND (${t.protocolVersion} IS DISTINCT FROM 3 OR ${t.planMode} = 'same_baseline_pair') AND (${t.protocolVersion} IS DISTINCT FROM 4 OR ${t.planMode} = 'parallel_pair') AND (${t.planMode} <> 'bounded_dag' OR (${t.workflow} = 'serial' AND ${t.protocolVersion} = 5)) AND (${t.protocolVersion} IS DISTINCT FROM 5 OR ${t.planMode} = 'bounded_dag')`), check("camp_goals_execution_pool", sql`${t.executionPool} IS NULL OR (${t.protocolVersion} IN (4,5) AND jsonb_typeof(${t.executionPool}) = 'object' AND octet_length(${t.executionPool}::text) <= 8192)`), check("camp_goals_reviewed_items", sql`jsonb_typeof(${t.reviewedItems}) = 'object' AND octet_length(${t.reviewedItems}::text) <= 65536`)]);
 
 export const campTasks = pgTable("camp_tasks", {
   taskId: uuid("task_id").primaryKey().references(() => tasks.id, { onDelete: "cascade" }),
@@ -7802,6 +7819,8 @@ export const campOperations = pgTable("camp_operations", {
   goalId: uuid("goal_id").notNull().references(() => campGoals.id, { onDelete: "cascade" }),
   goalAttempt: integer("goal_attempt").notNull(),
   kind: text("kind", { enum: ["verification", "integration"] }).notNull().default("verification"),
+  scope: text("scope", { enum: ["goal", "node_input"] }).notNull().default("goal"),
+  planItemKey: text("plan_item_key"),
   inputCandidate: jsonb("input_candidate").$type<import("../services/camp/types").CampCandidate>().notNull(),
   verificationPolicy: jsonb("verification_policy").$type<import("../services/camp/types").CampVerificationPolicySnapshot>(),
   integrationInput: jsonb("integration_input").$type<import("../../../camp-protocol/src/index.js").CampIntegrationInput>(),
@@ -7812,7 +7831,7 @@ export const campOperations = pgTable("camp_operations", {
   infrastructureFailures: integer("infrastructure_failures").notNull().default(0),
   receipt: jsonb("receipt").$type<import("../../../camp-protocol/src/index.js").CampVerificationReceipt>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-}, t => [index("camp_operations_room_status").on(t.roomId, t.status), index("camp_operations_goal_attempt").on(t.goalId, t.goalAttempt), check("camp_operations_counts", sql`${t.goalAttempt} > 0 AND ${t.attempt} >= 0 AND ${t.infrastructureFailures} >= 0`), uniqueIndex("camp_operations_integration_attempt").on(t.goalId, t.goalAttempt).where(sql`${t.kind} = 'integration'`), check("camp_operations_payload_kind", sql`(${t.kind} = 'verification' AND ${t.verificationPolicy} IS NOT NULL AND ${t.integrationInput} IS NULL AND ${t.integrationReport} IS NULL AND ${t.inputDigest} IS NULL) OR (${t.kind} = 'integration' AND ${t.verificationPolicy} IS NULL AND ${t.receipt} IS NULL AND ${t.integrationInput} IS NOT NULL AND ${t.inputDigest} IS NOT NULL AND ${t.inputDigest} ~ '^[a-f0-9]{64}$')`)]);
+}, t => [index("camp_operations_room_status").on(t.roomId, t.status), index("camp_operations_goal_attempt").on(t.goalId, t.goalAttempt), check("camp_operations_counts", sql`${t.goalAttempt} > 0 AND ${t.attempt} >= 0 AND ${t.infrastructureFailures} >= 0`), uniqueIndex("camp_operations_integration_scope").on(t.goalId, t.goalAttempt, t.scope, sql`coalesce(${t.planItemKey}, '')`).where(sql`${t.kind} = 'integration'`), check("camp_operations_scope", sql`(${t.scope} = 'goal' AND ${t.planItemKey} IS NULL) OR (${t.kind} = 'integration' AND ${t.scope} = 'node_input' AND ${t.planItemKey} IS NOT NULL)`), check("camp_operations_payload_kind", sql`(${t.kind} = 'verification' AND ${t.verificationPolicy} IS NOT NULL AND ${t.integrationInput} IS NULL AND ${t.integrationReport} IS NULL AND ${t.inputDigest} IS NULL) OR (${t.kind} = 'integration' AND ${t.verificationPolicy} IS NULL AND ${t.receipt} IS NULL AND ${t.integrationInput} IS NOT NULL AND ${t.inputDigest} IS NOT NULL AND ${t.inputDigest} ~ '^[a-f0-9]{64}$')`)]);
 
 // Unified execution ledger; CHECK below excludes ambiguous agent/operation owners.
 export const campRuns = pgTable("camp_runs", {
@@ -7911,9 +7930,32 @@ export const campPlans = pgTable("camp_plans", {
   revision: integer("revision").notNull().default(1),
   bodyHash: text("body_hash").notNull(),
   summary: text("summary").notNull(),
-  items: jsonb("items").$type<import("../services/camp/types").CampPlanItem[]>().notNull(),
+  items: jsonb("items").$type<Array<import("../services/camp/types").CampPlanItem | import("../../../camp-protocol/src/index.js").CampDagPlanItem>>().notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-}, t => [unique("camp_plans_goal_id_goal_attempt_key").on(t.goalId, t.goalAttempt)]);
+}, t => [unique("camp_plans_goal_id_goal_attempt_key").on(t.goalId, t.goalAttempt), check("camp_plans_revision_check", sql`${t.revision} IN (1,2)`)]);
+
+// Protocol 5 normalizes durable graph state; immutable definitions remain in
+// camp_plans, while canonical tasks and the common Run ledger own execution.
+export const campDagNodes = pgTable("camp_dag_nodes", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  planId: uuid("plan_id").notNull().references(() => campPlans.id, { onDelete: "cascade" }),
+  goalId: uuid("goal_id").notNull().references(() => campGoals.id, { onDelete: "cascade" }),
+  goalAttempt: integer("goal_attempt").notNull(),
+  key: text("key").notNull(),
+  ordinal: integer("ordinal").notNull(),
+  status: text("status").$type<import("../services/camp/dagTypes").DagNodeStatus>().notNull().default("waiting_dependencies"),
+  inputCandidate: jsonb("input_candidate").$type<import("../services/camp/types").CampCandidate>(),
+  inputSources: jsonb("input_sources").$type<import("../../../camp-protocol/src/index.js").CampIntegrationParent[]>().notNull().default([]),
+  inputResolution: text("input_resolution").$type<import("../services/camp/dagTypes").DagInputResolution>(),
+  inputOperationId: uuid("input_operation_id").references(() => campOperations.id),
+  activeTaskId: uuid("active_task_id").references(() => tasks.id),
+  approvedProducer: jsonb("approved_producer").$type<import("../services/camp/dagTypes").DagApprovedProducer>(),
+  reworkCount: integer("rework_count").notNull().default(0),
+}, t => [uniqueIndex("camp_dag_nodes_key").on(t.goalId, t.goalAttempt, t.key), index("camp_dag_nodes_plan").on(t.planId, t.ordinal), check("camp_dag_nodes_counts", sql`${t.goalAttempt} > 0 AND ${t.ordinal} >= 0 AND ${t.ordinal} < 6 AND ${t.reworkCount} >= 0`), check("camp_dag_nodes_status", sql`${t.status} IN ('waiting_dependencies','waiting_integration','ready','building','reviewing','waiting_question','approved','blocked')`)]);
+export const campDagEdges = pgTable("camp_dag_edges", {
+  fromNodeId: uuid("from_node_id").notNull().references(() => campDagNodes.id, { onDelete: "cascade" }),
+  toNodeId: uuid("to_node_id").notNull().references(() => campDagNodes.id, { onDelete: "cascade" }),
+}, t => [primaryKey({ columns: [t.fromNodeId, t.toNodeId] }), check("camp_dag_edges_not_self", sql`${t.fromNodeId} <> ${t.toNodeId}`)]);
 
 export const campFinalizations = pgTable("camp_finalizations", {
   id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),

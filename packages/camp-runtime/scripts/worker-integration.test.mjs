@@ -30,7 +30,7 @@ async function fixture() {
     async request(path, body) {
       if (path === '/protocol') return serverProtocol();
       if (path.startsWith('/reconcile')) return { runs: [] };
-      if (path === '/claim') { claims.push(body); if (allocated) return { run: null, requirements: null, compatibility: null }; allocated = true; const requirements = getTaskRequirements(run); run.workerProtocol = { version: 3, declaration: body.protocol, requirements }; return { run, requirements, compatibility: checkWorkerCompatibility(body.protocol, requirements) }; }
+      if (path === '/claim') { claims.push(body); if (allocated) return { run: null, requirements: null, compatibility: null }; allocated = true; const requirements = getTaskRequirements(run); run.workerProtocol = { version: run.protocolVersion, declaration: body.protocol, requirements }; return { run, requirements, compatibility: checkWorkerCompatibility(body.protocol, requirements) }; }
       if (path.endsWith('/heartbeat')) return { run, cancelRequested: state.run.cancelRequested };
       if (path.endsWith('/state')) return state;
       if (path.endsWith('/complete')) { assert.ok(events.includes('cleanup')); completions.push(body); state.run.status = body.status; state.leaseValid = false; return { replayed: completions.length > 1 }; }
@@ -63,6 +63,52 @@ test('an integration conflict is an exact business result without a fallback can
     await startWorker(f.options);
     assert.equal(f.completions[0].status, 'completed'); assert.equal(f.completions[0].integration.status, 'conflict');
     assert.equal('candidate' in f.completions[0], false); assert.equal('changeSet' in f.completions[0], false);
+  } finally { await f.close(); }
+});
+
+test('a DAG join stages Goal-baseline changes while preserving its distinct native merge base', async () => {
+  const f = await fixture();
+  try {
+    const dagInput = parseIntegrationInput({ ...input, algorithm: 'layerfs-three-way-v2' });
+    const dagReport = parseIntegrationReport({ ...merged, algorithm: dagInput.algorithm, inputDigest: createHash('sha256').update(serializeIntegrationInput(dagInput)).digest('hex'), candidate: { ...merged.candidate, baseRef: dagInput.base.refId } });
+    const goalBaseline = candidate('a');
+    Object.assign(f.run, { protocolVersion: 5, integrationInput: dagInput, goalBaseline });
+    f.options.executionPool = { poolId: randomUUID(), storageId: 'a'.repeat(64), maxParallel: 2, workerIds: [f.env.CAMP_WORKER_ID, 'other-lane'], resources: { maxContainers: 4, cpuMillis: 8000, memoryBytes: 8 * 1024 ** 3, pidsLimit: 1024 } };
+    f.options.createChangeSet = async ({ base, target }) => {
+      assert.deepEqual(base, goalBaseline); assert.deepEqual(target, dagReport.candidate);
+      return { ...changes, base, target };
+    };
+    f.options.integrateCandidates = async ({ integrationInput, onIntent, onResult }) => {
+      assert.deepEqual(integrationInput.base, input.base);
+      await onIntent(); await onResult(dagReport); return dagReport;
+    };
+    await startWorker(f.options);
+    assert.equal(f.completions.length, 1);
+    const payload = f.completions[0], [record] = await f.journal.list();
+    assert.deepEqual(payload.inputCandidate, input.base);
+    assert.equal(payload.candidate.baseRef, input.base.refId);
+    assert.deepEqual(payload.changeSet.base, goalBaseline);
+    assert.deepEqual(record.integrationGoalBaseline, goalBaseline);
+    assert.deepEqual(integrationCompletion(record), payload);
+    assert.throws(() => integrationCompletion({ ...record, integrationGoalBaseline: undefined }));
+    assert.throws(() => integrationCompletion({ ...record, integrationChangeSet: { ...record.integrationChangeSet, base: input.base } }), /Goal baseline/);
+  } finally { await f.close(); }
+});
+
+test('validated DAG recovery preserves its frozen Goal baseline without recomputing the native join', async () => {
+  const f = await fixture();
+  try {
+    const dagInput = parseIntegrationInput({ ...input, algorithm: 'layerfs-three-way-v2' });
+    const dagReport = parseIntegrationReport({ ...merged, algorithm: dagInput.algorithm, inputDigest: createHash('sha256').update(serializeIntegrationInput(dagInput)).digest('hex') });
+    const goalBaseline = candidate('a');
+    Object.assign(f.run, { protocolVersion: 5, integrationInput: dagInput, goalBaseline });
+    const record = await f.record();
+    await f.journal.update(record, { integrationGoalBaseline: goalBaseline, integrationReport: dagReport, integrationChangeSet: { ...changes, base: goalBaseline }, phase: 'integration_result_recorded' });
+    await recoverWorker({ ...f.options, inspectIntegration: async () => ({ status: 'validated', report: dagReport }) });
+    assert.equal(f.completions.length, 1); assert.equal(f.integrations, 0);
+    assert.deepEqual(f.completions[0].changeSet.base, goalBaseline);
+    assert.deepEqual(f.completions[0].inputCandidate, dagInput.base);
+    assert.deepEqual(f.completions[0], integrationCompletion(record));
   } finally { await f.close(); }
 });
 

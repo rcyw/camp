@@ -5,6 +5,7 @@ import { Button } from "@botiverse/raft-ui";
 import type { CampArtifact, CampExecutionPool, CampGoal, CampRole, CampRun, CampTask } from "./campApi";
 import { campRunStatusLabel, campTaskStatusLabel, leaseExpired } from "./campStatus";
 import CampCandidateReference, { candidateRefId, candidateRefLabel } from "./CampCandidateReference";
+import { usesExecutionPool } from "./campPlanMode";
 
 export function CampRunExecution({ run, pool, parallel = false, historical = false, itemTitle, canCancel = false, busy = false, onCancel }: {
   run: CampRun;
@@ -63,7 +64,7 @@ export function CampRoleCard({ role, runs, goals = [], canCancel, busy, onCancel
       </div>
       {current.length > 0 ? <div className="mt-3 flex flex-col gap-3">{current.map(run => {
         const goal = goals.find(goal => goal.id === run.goalId);
-        return <CampRunExecution key={run.id} run={run} pool={goal?.executionPool} parallel={goal?.planMode === "parallel_pair"} itemTitle={goal?.items?.find(item => item.key === run.planItemKey)?.title} canCancel={canCancel} busy={busy} onCancel={onCancel} />;
+        return <CampRunExecution key={run.id} run={run} pool={goal?.executionPool} parallel={usesExecutionPool(goal?.planMode)} itemTitle={goal?.items?.find(item => item.key === run.planItemKey)?.title} canCancel={canCancel} busy={busy} onCancel={onCancel} />;
       })}</div> : <>
         <p className="mt-3 text-sm text-foreground-secondary" role="status">{t({ id: latest ? campRunStatusLabel(latest) : "camp.idle" })}</p>
         {latest?.cleanupState === "unknown" && <p className="mt-2 text-xs text-foreground-hint">{t({ id: "camp.cleanupUnknown" })}</p>}

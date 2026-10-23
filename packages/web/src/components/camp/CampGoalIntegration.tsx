@@ -27,7 +27,7 @@ function CandidateIdentity({ candidate }: { candidate: CampCandidate }) {
   </div>;
 }
 
-function IntegrationOperation({ operation }: { operation: CampIntegrationOperation }) {
+export function CampIntegrationOperationView({ operation }: { operation: CampIntegrationOperation }) {
   const { formatMessage: t, formatDate, formatTime } = useIntl();
   const input = operation.integrationInput, receipt = operation.integrationReport;
   const receiptMatches = receipt !== null && receipt.inputDigest === operation.inputDigest && receipt.operationId === operation.id
@@ -38,8 +38,9 @@ function IntegrationOperation({ operation }: { operation: CampIntegrationOperati
   const recorded = receiptMatches ? receipt : null;
   const state = operation.status === "completed" ? recorded?.status ?? "unknown" : operation.status;
   const integratedAt = recorded ? new Date(recorded.integratedAt) : null;
-  return <li className="rounded-lg border border-border-default p-3" data-testid="camp-integration-operation" data-operation-id={operation.id} data-status={state}>
+  return <li className="rounded-lg border border-border-default p-3" data-testid="camp-integration-operation" data-operation-id={operation.id} data-status={state} data-scope={operation.scope ?? "goal"} data-item-key={operation.planItemKey}>
     <p className="text-sm font-medium">{t({ id: "camp.integration.systemOperation" })} · {t({ id: statusLabel(state) })}</p>
+    {operation.scope === "node_input" && <p className="mt-2 break-words text-xs font-medium">{t({ id: "camp.graph.nodeIntegration" }, { key: visibleSourceText(operation.planItemKey ?? "") })}</p>}
     <p className="mt-1 text-xs text-foreground-hint">{t({ id: "camp.goalAttempt" }, { attempt: operation.goalAttempt })} · {t({ id: "camp.attempt" }, { epoch: operation.attempt })}</p>
     <details className="mt-3" data-testid="camp-integration-inputs">
       <summary className="cursor-pointer text-xs font-medium">{t({ id: "camp.integration.inputs" })}</summary>
@@ -47,7 +48,7 @@ function IntegrationOperation({ operation }: { operation: CampIntegrationOperati
         <p className="mb-2 text-xs font-medium">{t({ id: "camp.integration.base" })}</p>
         <CandidateIdentity candidate={input.base} />
       </div>
-      <ol className="mt-3 grid gap-3 sm:grid-cols-2">{input.parents.map((parent, index) => <li key={parent.key} className="min-w-0 rounded border border-border-default p-3" data-testid="camp-integration-parent" data-parent-key={parent.key}>
+      <ol className={`mt-3 grid gap-3 ${operation.scope === "node_input" ? "" : "sm:grid-cols-2"}`}>{input.parents.map((parent, index) => <li key={parent.key} className="min-w-0 rounded border border-border-default p-3" data-testid="camp-integration-parent" data-parent-key={parent.key}>
         <p className="mb-2 break-words text-xs font-medium">{t({ id: "camp.integration.parent" }, { index: index + 1, key: visibleSourceText(parent.key) })}</p>
         <CandidateIdentity candidate={parent.candidate} />
         <p className="mt-2 break-all font-mono text-xs text-foreground-hint">{t({ id: "camp.integration.producer" })}: {parent.runId} · {t({ id: "camp.attempt" }, { epoch: parent.epoch })}</p>
@@ -75,16 +76,18 @@ export default function CampGoalIntegration({ goal, history = [] }: { goal: Camp
   const { formatMessage: t } = useIntl();
   const integration = goal.integration;
   if (!integration?.required && !hasSharedBaseline(goal.planMode)) return null;
-  const status = integration?.status ?? "pending", operations = (integration?.operations ?? []).filter(operation => operation.goalAttempt === goal.attempt);
+  const graph = goal.planMode === "bounded_dag";
+  const status = integration?.status ?? "pending", operations = (integration?.operations ?? []).filter(operation => operation.goalAttempt === goal.attempt && operation.scope !== "node_input");
   const previous = history.filter(operation => operation.goalId === goal.id && operation.goalAttempt !== goal.attempt);
+  if (graph && operations.length === 0 && previous.length === 0) return null;
   return <section className="rounded-lg border border-border-default p-4" aria-label={t({ id: "camp.integration.title" })} data-testid="camp-goal-integration" data-status={status}>
-    <h5 className="text-sm font-medium">{t({ id: "camp.integration.title" })}</h5>
+    <h5 className="text-sm font-medium">{t({ id: graph ? "camp.graph.finalIntegration" : "camp.integration.title" })}</h5>
     <p className="mt-2 text-sm font-medium" role="status">{t({ id: statusLabel(status) })}</p>
-    <p className="mt-2 text-xs text-foreground-hint">{t({ id: "camp.integration.scope" })}</p>
+    <p className="mt-2 text-xs text-foreground-hint">{t({ id: graph ? "camp.graph.finalIntegrationHelp" : "camp.integration.scope" })}</p>
     {operations.length === 0 && <p className="mt-2 text-sm text-foreground-hint">{t({ id: status === "not_run" ? "camp.integration.notRunHelp" : "camp.integration.waitingParents" })}</p>}
     {status === "blocked" && <p className="mt-2 text-sm text-foreground-secondary">{t({ id: "camp.integration.blockedHelp" })}</p>}
-    {operations.length > 0 && <ol className="mt-3 flex flex-col gap-3">{operations.map(operation => <IntegrationOperation key={operation.id} operation={operation} />)}</ol>}
-    {previous.length > 0 && <details className="mt-3" data-testid="camp-integration-history"><summary className="cursor-pointer text-xs font-medium">{t({ id: "camp.integration.history" }, { count: previous.length })}</summary><ol className="mt-3 flex flex-col gap-3">{previous.map(operation => <IntegrationOperation key={operation.id} operation={operation} />)}</ol></details>}
+    {operations.length > 0 && <ol className="mt-3 flex flex-col gap-3">{operations.map(operation => <CampIntegrationOperationView key={operation.id} operation={operation} />)}</ol>}
+    {previous.length > 0 && <details className="mt-3" data-testid="camp-integration-history"><summary className="cursor-pointer text-xs font-medium">{t({ id: "camp.integration.history" }, { count: previous.length })}</summary><ol className="mt-3 flex flex-col gap-3">{previous.map(operation => <CampIntegrationOperationView key={operation.id} operation={operation} />)}</ol></details>}
     {status !== "not_run" && <p className="mt-3 text-xs text-foreground-hint">{t({ id: "camp.integration.recoveryHelp" })}</p>}
   </section>;
 }

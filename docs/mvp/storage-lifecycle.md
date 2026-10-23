@@ -7,9 +7,9 @@ an execution deployment at a location; it is not the owner of project history.
 ## Ordered delivery
 
 The first storage release delivers cold project backups, isolated restoration
-and an explicit migration handoff. Arbitrary dependency graphs and concurrent
-Workers on different hosts remain disabled until the transport and scheduling
-gates below pass. A migration is not concurrent multi-host execution.
+and an explicit migration handoff. Protocol 5 [bounded dependency graphs](./bounded-dag.md) now have a separate
+local-pool contract. Concurrent writers on different hosts remain disabled
+until the transport and scheduling gates below pass. A migration is not concurrent multi-host execution.
 
 The pinned LayerFS SDK has no supported online backup or graph-transfer API.
 Importing an exported file tree creates new project bindings, Layers and
@@ -111,10 +111,12 @@ CAMP_TOOLCHAIN_BUNDLE=<verified original toolchain bundle directory>
 CAMP_STORAGE_BUNDLE=<private local backup bundle directory>
 ```
 
-Storage maintenance needs no model key. The source and target select the same
-bundle content, toolchain digest and image identity. Transfer the private bundle
-directory using the operator's existing transport; retain file permissions.
-The API does not upload, expose or store local bundle paths.
+Storage maintenance needs no model key. Resumable private transfer through the
+API is documented in the [transport guide](./private-artifact-transfer.md).
+The source and target select the same bundle content, toolchain digest and
+image identity. Use the private artifact upload/download commands to move it through
+the authenticated API, or retain a separately managed private transport. Local
+bundle paths never enter API metadata or public snapshots.
 
 ```sh
 node --env-file=.camp/storage-source.env packages/camp-runtime/scripts/storage.mjs backup --operation <operation UUID>
@@ -158,6 +160,8 @@ historical branch; acceptance also exports the accepted tree and executes new
 work from that candidate.
 
 ## Dependency scheduling after storage
+
+This boundary is implemented for protocol 5 in the [bounded graph contract](./bounded-dag.md); the limits and receipt semantics there are authoritative.
 
 Use a new negotiated plan contract with bounded task keys and `dependsOnKeys`.
 Store normalized nodes, edges and plan revision before acknowledging a plan.

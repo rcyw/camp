@@ -18,7 +18,7 @@ import { exportCandidate } from '../../packages/camp-runtime/src/export.mjs';
 import { superviseOwnedChild } from './owned-child.mjs';
 
 const execute = promisify(execFile);
-const docker = args => execute('docker', args, { timeout: 30000, maxBuffer: 1024 * 1024 });
+const docker = args => execute('docker', ['--host', 'unix://' + (process.env.CAMP_DOCKER_SOCKET ?? '/var/run/docker.sock'), ...args], { timeout: 30000, maxBuffer: 1024 * 1024 });
 
 if (['--serial-probe', '--policy-probe'].includes(process.argv[2])) {
   const serialProbe = process.argv[2] === '--serial-probe';

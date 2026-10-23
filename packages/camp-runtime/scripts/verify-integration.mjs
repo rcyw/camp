@@ -22,14 +22,14 @@ if (process.argv[2] === '--interrupt-child') {
 if (process.argv[2] !== '--real') throw new Error('Use --real for an isolated Docker/LayerFS integration proof');
 const folder = await mkdtemp(join(tmpdir(), 'camp-integration-proof-'));
 const image = JSON.parse(await readFile(join(runtimePackage, '.local/standard-image.json'), 'utf8'));
-const options = { home: join(folder, 'state'), toolchainBundle: process.env.CAMP_TOOLCHAIN_BUNDLE ?? defaultBundle, imageId: process.env.CAMP_RUNTIME_IMAGE ?? image.imageId };
+const options = { home: join(folder, 'state'), docker: process.env.CAMP_DOCKER_SOCKET ?? '/var/run/docker.sock', toolchainBundle: process.env.CAMP_TOOLCHAIN_BUNDLE ?? defaultBundle, imageId: process.env.CAMP_RUNTIME_IMAGE ?? image.imageId };
 const runtime = await new CampRuntime(options).ready();
 const namespace = `integration-proof-${randomUUID()}`, owners = [];
 let project, receipt, sentinel;
-const controller = new AbortController(), timer = setTimeout(() => controller.abort(new Error('Integration proof deadline')), 240_000);
+const controller = new AbortController(), timer = setTimeout(() => controller.abort(new Error('Integration proof deadline')), 360_000);
 const signal = controller.signal;
 const owner = () => { const identity = runtime.runIdentity(randomUUID() + '-e1'); owners.push(identity); return identity; };
-const pair = (base, left, right) => ({ schemaVersion: 1, algorithm: 'layerfs-three-way-v1', policy: 'reject-overlap-v1', base, parents: [{ key: 'left', runId: randomUUID(), epoch: 1, candidate: left }, { key: 'right', runId: randomUUID(), epoch: 1, candidate: right }] });
+const pair = (base, left, right, algorithm = 'layerfs-three-way-v1') => ({ schemaVersion: 1, algorithm, policy: 'reject-overlap-v1', base, parents: [{ key: 'left', runId: randomUUID(), epoch: 1, candidate: left }, { key: 'right', runId: randomUUID(), epoch: 1, candidate: right }] });
 async function build(base, code) {
   const identity = owner(); let run;
   try {
@@ -83,6 +83,24 @@ try {
   assert.deepEqual(compareIntegrationTree(after, new Map([...continuedTree].filter(([path]) => !['next-left', 'next-right'].includes(path)))), []);
   assert.equal(continuedTree.get('binary').sha256, after.get('binary').sha256); assert.equal(continuedTree.get('mode').mode, 0o751); assert.equal(continuedTree.has('deleted'), false);
   assert.equal(treeDigest(await tree(merged.candidate)), treeDigest(after), 'The prior accepted merge remains immutable');
+  const dagLeft = (await build(merged.candidate, "require('node:fs').writeFileSync('dag-left','after a prior integration\\n')")).candidate;
+  const dagRight = (await build(left, "require('node:fs').writeFileSync('dag-right','after one shared ancestor\\n')")).candidate;
+  const dagOwner = owner(), dagInput = pair(left, dagLeft, dagRight, 'layerfs-three-way-v2');
+  const dag = await runTrustedIntegration({ runtime, ownerRun: dagOwner, integrationInput: dagInput, signal });
+  assert.equal(dag.status, 'merged'); assert.equal(dag.candidate.baseRef, left.refId);
+  const dagTree = await tree(dag.candidate);
+  assert(dagTree.has('dag-left')); assert(dagTree.has('dag-right')); assert.equal(dagTree.get('b').sha256, after.get('b').sha256);
+  const dagProof = JSON.parse(await readFile(join(dagOwner.folder, 'integration-ancestry.json')));
+  assert.equal(dagProof.proof.mergeBase, left.refId); assert(dagProof.proof.nodes.some(node => node.id === right.refId));
+  assert.equal((await recoverTrustedIntegration({ runtime, ownerRun: dagOwner, integrationInput: dagInput, signal })).status, 'validated');
+  const reversed = await runTrustedIntegration({ runtime, ownerRun: owner(), integrationInput: pair(base, right, left), signal });
+  assert.equal(reversed.status, 'merged');
+  const crossRight = (await build(reversed.candidate, "require('node:fs').writeFileSync('dag-cross','other merge order\\n')")).candidate;
+  const crossOwner = owner();
+  const cross = await runTrustedIntegration({ runtime, ownerRun: crossOwner, integrationInput: pair(left, dagLeft, crossRight, 'layerfs-three-way-v2'), signal });
+  assert.equal(cross.status, 'rejected'); assert(cross.conflicts.some(row => row.reason === 'unsupported'));
+  const crossIntent = JSON.parse(await readFile(join(crossOwner.folder, 'integration-intent.json')));
+  assert.equal((await runtime.sdk(project, 'project.branch_info', [crossIntent.branches.output], project, { signal })).items.length, 0, 'Ambiguous criss-cross never invokes native merge');
   const noopOwner = owner(), noopInput = pair(base, base, base);
   const noop = await runTrustedIntegration({ runtime, ownerRun: noopOwner, integrationInput: noopInput, signal });
   assert.equal(noop.status, 'merged'); assert.equal(noop.candidate.refKind, 'layer'); assert.equal(noop.candidate.refId, base.refId); assert.equal(noop.candidate.rootId, base.rootId);
@@ -106,7 +124,7 @@ try {
   await assert.rejects(runTrustedIntegration({ runtime, ownerRun: interruptedOwner, integrationInput: input, signal }), error => error.code === 'camp_integration_inspection_required' && error.cleanupKnown);
   const intent = JSON.parse(await readFile(join(interruptedOwner.folder, 'integration-intent.json'), 'utf8'));
   const saved = await runtime.sdk(project, 'project.branch_info', [intent.branches.output], project, { signal }); assert.equal(saved.items.length, 1);
-  receipt = { schemaVersion: 1, at: new Date().toISOString(), namespace, imageId: options.imageId, base, parents: [left, right], merged, continued, proof: { nativeMerge: true, mergeCommitBaselineWithSecondParent: true, continuedPriorTreePreserved: true, layerNoop: true, immutableInputs: true, binaryPreserved: true, deletionPreserved: true, modePreserved: true, overlapRejected: true, deleteModifyRejected: true, lwwRejected: true, realSigkillAfterNative: true, ambiguousOutcomeNotRetried: true, stageBeforeCleanup: true }, modelCalls: 0 };
+  receipt = { schemaVersion: 1, at: new Date().toISOString(), namespace, imageId: options.imageId, base, parents: [left, right], merged, continued, dag, proof: { nativeMerge: true, mergeCommitBaselineWithSecondParent: true, continuedPriorTreePreserved: true, dagSecondaryAncestry: true, dagSharedAncestorBase: true, dagValidatedRecovery: true, crissCrossRejectedBeforeMerge: true, layerNoop: true, immutableInputs: true, binaryPreserved: true, deletionPreserved: true, modePreserved: true, overlapRejected: true, deleteModifyRejected: true, lwwRejected: true, realSigkillAfterNative: true, ambiguousOutcomeNotRetried: true, stageBeforeCleanup: true }, modelCalls: 0 };
 } finally {
   clearTimeout(timer);
   for (const identity of owners) await runtime.cleanupAttempt(identity.prefix);

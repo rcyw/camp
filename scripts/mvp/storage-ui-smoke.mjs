@@ -83,6 +83,11 @@ try {
   assert.equal(await restoreCommand.locator('code').innerText(), `node --env-file=.camp/storage-target.env packages/camp-runtime/scripts/storage.mjs restore --operation ${migrationId}`);
   assert.equal(await storagePanel.getByTestId('camp-storage-command-backup').count(), 0);
   const migration = storagePanel.locator(`[data-testid=camp-storage-operation][data-operation-id="${migrationId}"]`);
+  const transfer = migration.getByTestId('camp-storage-transfer'); await transfer.locator('summary').click();
+  assert.equal(await transfer.getByTestId('camp-storage-command-upload').locator('code').innerText(), `node --env-file=.camp/storage-source.env packages/camp-runtime/scripts/artifacts.mjs upload --operation ${backupId}`);
+  assert.equal(await transfer.getByTestId('camp-storage-command-download').locator('code').innerText(), `node --env-file=.camp/storage-target.env packages/camp-runtime/scripts/artifacts.mjs download --operation ${migrationId}`);
+  assert.equal(writes.length, 2, 'Viewing transfer commands must not start a transfer or activate storage');
+  await transfer.getByText(/restore verification and explicit activation are still required/).waitFor();
   await migration.getByText(backupId, { exact: true }).waitFor();
   const inventory = migration.getByTestId('camp-storage-inventory'); await inventory.locator('summary').click();
   await inventory.getByText('Showing 1 of 12 references. The backup and validation use the complete frozen inventory.', { exact: true }).waitFor();
@@ -114,9 +119,10 @@ try {
   assert.equal(await storagePanel.getByTestId('camp-storage-command-backup').count(), 0);
   assert.equal(await storagePanel.getByTestId('camp-storage-command-restore').count(), 0);
   assert.equal(await storagePanel.getByTestId('camp-storage-command-report-backup').count(), 0);
+  assert.equal(await storagePanel.getByTestId('camp-storage-transfer').count(), 0);
   for (const name of ['Prepare backup', 'Prepare migration', 'Activate verified target', 'Cancel storage operation', 'Restore or migrate from this backup']) assert.equal(await storagePanel.getByRole('button', { name, exact: true }).count(), 0);
   await storagePanel.scrollIntoViewIfNeeded(); await page.screenshot({ path: resolve(folder, 'member-read-only.png'), fullPage: true });
   assert.equal(await panel.getByTestId('camp-room-error').count(), 0); assert.deepEqual(errors, []); assert.deepEqual(downloads, []);
-  const receipt = { event: 'storage_ui_fixture_passed', url, realBrowser: true, realHttpAuth: true, campApiIntercepted: true, roleOutputs: 'none', campDatabaseMutations: 0, modelCalls: 0, storageOperationsExecuted: 0, fixtureMutations: writes.length, preparedBackupCommand: true, lostReceiptRecoveryGuidance: true, completedBackupRestore: true, backupSurvivesStorageRelocation: true, explicitTargetActivation: true, frozenPlanAndBundleDigestsSeparated: true, boundedInventoryCount: true, acceptedCandidatePreserved: true, memberReadOnly: true, folder };
+  const receipt = { event: 'storage_ui_fixture_passed', url, realBrowser: true, realHttpAuth: true, campApiIntercepted: true, roleOutputs: 'none', campDatabaseMutations: 0, modelCalls: 0, storageOperationsExecuted: 0, fixtureMutations: writes.length, preparedBackupCommand: true, lostReceiptRecoveryGuidance: true, completedBackupRestore: true, backupSurvivesStorageRelocation: true, explicitPrivateTransferCommands: true, explicitTargetActivation: true, frozenPlanAndBundleDigestsSeparated: true, boundedInventoryCount: true, acceptedCandidatePreserved: true, memberReadOnly: true, folder };
   await writeFile('.camp/storage-ui-latest.json', JSON.stringify(receipt, null, 2) + '\n', { mode: 0o600 }); console.log(JSON.stringify(receipt, null, 2));
 } finally { await browser.close(); }

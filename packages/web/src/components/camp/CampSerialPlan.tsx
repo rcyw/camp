@@ -4,9 +4,10 @@ import type { CampGoal, CampRun, CampTask, CampWorkItem } from "./campApi";
 import { CampRunExecution, CampRunResults } from "./CampRunViews";
 import { campTaskStatusLabel } from "./campStatus";
 import CampCandidateReference from "./CampCandidateReference";
-import { hasSharedBaseline, planModeHelp } from "./campPlanMode";
+import { hasSharedBaseline, planModeHelp, usesExecutionPool } from "./campPlanMode";
+import { CampDagInput, CampDagDelivery, dagItemAnchor, dagItemRows } from "./CampDagEvidence";
 
-const SCHEDULING_REASONS = { room_capacity: "camp.scheduling.reason.roomCapacity", cleanup_pending: "camp.scheduling.reason.cleanupPending", reviewer_queue: "camp.scheduling.reason.reviewerQueue", question_pending: "camp.scheduling.reason.questionPending" } as const;
+const SCHEDULING_REASONS = { room_capacity: "camp.scheduling.reason.roomCapacity", cleanup_pending: "camp.scheduling.reason.cleanupPending", reviewer_queue: "camp.scheduling.reason.reviewerQueue", question_pending: "camp.scheduling.reason.questionPending", dependencies_pending: "camp.scheduling.reason.dependenciesPending", node_integration_pending: "camp.scheduling.reason.nodeIntegrationPending" } as const;
 
 function ReviewHistory({ reviews }: { reviews: CampWorkItem["reviews"] }) {
   const { formatMessage: t } = useIntl();
@@ -40,16 +41,17 @@ function WorkItem({ item, tasks, runs, goal }: { item: CampWorkItem; tasks: Camp
   const owner = active?.role ?? (item.status === "reviewing" ? "reviewer" : "builder");
   const questions = (goal.questions ?? []).filter(question => taskIds.has(question.taskId) && !["answered", "cancelled"].includes(question.status));
   const failure = item.status === "needs_attention" ? history.find(run => run.error || run.status === "failed") : undefined;
-  const parallel = goal.planMode === "parallel_pair";
+  const parallel = usesExecutionPool(goal.planMode), graph = goal.planMode === "bounded_dag";
   const liveRuns = history.filter(run => run.status === "running");
   const schedulingReason = item.scheduling?.reason;
   const schedulingReasonLabel = schedulingReason ? SCHEDULING_REASONS[schedulingReason as keyof typeof SCHEDULING_REASONS] : undefined;
   return (
-    <li className="rounded-lg border border-border-default bg-layer-canvas p-4" data-testid={`camp-plan-item-${item.key}`}>
+    <li className="min-w-0 rounded-lg border border-border-default bg-layer-canvas p-4" data-testid={`camp-plan-item-${item.key}`} id={graph ? dagItemAnchor(goal.id, item.key) : undefined}>
       <header className="flex flex-wrap justify-between gap-2"><h6 className="min-w-0 break-words text-sm font-medium">{item.index + 1}. {item.title}</h6><span className="text-xs font-medium">{t({ id: `camp.item.status.${item.status}` })}</span></header>
       <p className="mt-1 text-xs text-foreground-hint">{t({ id: "camp.item.owner" }, { role: t({ id: `camp.role.${owner}` }) })}</p>
       {item.description && <p className="mt-2 whitespace-pre-wrap break-words text-sm text-foreground-secondary">{item.description}</p>}
       {hasSharedBaseline(goal.planMode) && <div className="mt-3 text-xs text-foreground-hint" data-testid="camp-item-shared-baseline"><p>{t({ id: "camp.integration.itemBaseHelp" })}</p>{goal.baseCandidate && <p className="mt-1"><CampCandidateReference candidate={goal.baseCandidate} /></p>}</div>}
+      {graph && <CampDagInput goal={goal} item={item} />}
       {parallel && item.scheduling && <div className="mt-3 text-xs text-foreground-secondary" data-testid="camp-item-scheduling" data-state={item.scheduling.state} data-reason={schedulingReason}><p>{t({ id: `camp.scheduling.${item.scheduling.state}` })}</p>{schedulingReasonLabel ? <p className="mt-1 text-foreground-hint">{t({ id: schedulingReasonLabel })}</p> : schedulingReason && <code className="mt-1 block break-all">{schedulingReason}</code>}</div>}
       {parallel && liveRuns.length > 0 && <div className="mt-3 flex flex-col gap-2">{liveRuns.map(run => <CampRunExecution key={run.id} run={run} pool={goal.executionPool} />)}</div>}
       <dl className="mt-3 grid gap-3 text-xs sm:grid-cols-2">
@@ -79,9 +81,10 @@ export default function CampSerialPlan({ goal, tasks, runs }: { goal: CampGoal; 
       {!goal.plan ? <p className="rounded-lg bg-layer-canvas p-3 text-sm text-foreground-hint">{t({ id: "camp.plan.pending" })}</p> : <details open className="rounded-lg border border-border-default p-4">
         <summary className="cursor-pointer text-sm font-medium">{t({ id: "camp.plan.items" }, { count: goal.items?.length ?? goal.plan.tasks.length })}</summary>
         <p className="mt-3 whitespace-pre-wrap break-words text-sm text-foreground-secondary">{goal.plan.summary}</p>
-        {hasSharedBaseline(goal.planMode) && <p className="mt-2 text-xs text-foreground-hint">{t({ id: planModeHelp(goal.planMode!) })}</p>}
-        <ol className={`mt-4 gap-3 ${goal.planMode === "parallel_pair" ? "grid lg:grid-cols-2" : "flex flex-col"}`}>{(goal.items ?? []).map(item => <WorkItem key={item.key} item={item} goal={goal} tasks={tasks} runs={runs} />)}</ol>
+        {(hasSharedBaseline(goal.planMode) || goal.planMode === "bounded_dag") && <p className="mt-2 text-xs text-foreground-hint">{t({ id: planModeHelp(goal.planMode!) })}</p>}
+        {goal.planMode === "bounded_dag" ? <section className="mt-4 flex flex-col gap-4" aria-label={t({ id: "camp.graph.title" })} data-testid="camp-dependency-graph">{dagItemRows(goal.items ?? []).map((row, index) => <ol key={row.map(item => item.key).join(":")} className={`grid gap-3 ${row.length > 1 ? "lg:grid-cols-2" : "grid-cols-1"}`} data-graph-layer={index}>{row.map(item => <WorkItem key={item.key} item={item} goal={goal} tasks={tasks} runs={runs} />)}</ol>)}</section> : <ol className={`mt-4 gap-3 ${usesExecutionPool(goal.planMode) ? "grid lg:grid-cols-2" : "flex flex-col"}`}>{(goal.items ?? []).map(item => <WorkItem key={item.key} item={item} goal={goal} tasks={tasks} runs={runs} />)}</ol>}
       </details>}
+      {goal.planMode === "bounded_dag" && <CampDagDelivery goal={goal} />}
       {finalTasks.length > 0 && (
         <section aria-label={t({ id: "camp.plan.finalization" })} className="rounded-lg border border-border-default p-4">
           <h5 className="text-sm font-medium">{t({ id: "camp.plan.finalization" })}</h5>

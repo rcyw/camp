@@ -23,7 +23,7 @@ export default function CampRoomSetup({ snapshot, canManage, onChanged }: { snap
     <CampProjectConfig room={snapshot.room} setup={setup} canManage={canManage} onChanged={onChanged} />
     {snapshot.room.verificationPolicy !== undefined && <CampVerificationPolicyConfig roomId={snapshot.room.id} current={snapshot.room.verificationPolicy} canManage={canManage} onSaved={onChanged} />}
     <section aria-label={t({ id: "camp.setup.step.worker" })}>
-      {canManage ? <CampWorkerConnection key={snapshot.room.id} roomId={snapshot.room.id} expanded={!checksClear} supportsParallel={snapshot.supportedPlanModes?.includes("parallel_pair")} /> : <p className="text-sm text-foreground-hint">{t({ id: "camp.setup.connectAdmin" })}</p>}
+      {canManage ? <CampWorkerConnection key={snapshot.room.id} roomId={snapshot.room.id} expanded={!checksClear} supportsParallel={snapshot.supportedPlanModes?.some(mode => mode === "parallel_pair" || mode === "bounded_dag")} /> : <p className="text-sm text-foreground-hint">{t({ id: "camp.setup.connectAdmin" })}</p>}
       <CampPreflightReportView readiness={setup.readiness} projectDigest={setup.projectDigest} />
     </section>
     <p className="text-xs text-foreground-hint">{t({ id: "camp.setup.queueHelp" })}</p>

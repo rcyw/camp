@@ -26,6 +26,12 @@ test('ordered plan requires actionable unique items rather than a prose completi
   assert.throws(() => checkedPlan({ ...plan, tasks: [...plan.tasks, plan.tasks[0]] }), /unique/);
   assert.throws(() => completionPolicy(claim('plan'), {}, input, output), /structured/);
 });
+test('DAG plan revision is frozen to protocol 5 while old ordered runs preserve revision 1', () => {
+  const dag = { ...plan, revision: 2, tasks: plan.tasks.map(item => ({ ...item, dependsOnKeys: [] })) };
+  assert.deepEqual(completionPolicy({ ...claim('build'), protocolVersion: 5 }, { plan: dag }, input, output), { status: 'completed' });
+  assert.throws(() => completionPolicy({ ...claim('build'), protocolVersion: 5 }, { plan }, input, output), /revision differs/);
+  assert.throws(() => completionPolicy({ ...claim('build'), protocolVersion: 4 }, { plan: dag }, input, output), /revision differs/);
+});
 for (const kind of ['plan', 'review', 'final_review', 'summary', 'clarification']) {
   test(`${kind} cannot include implementation changes in its candidate`, () => {
     assert.throws(() => completionPolicy(claim(kind), { plan, review: { outcome: 'approved', evidence: 'Tests passed' } }, input, { ...output, rootId: 'f'.repeat(64) }), /readonly_workspace_changed/);

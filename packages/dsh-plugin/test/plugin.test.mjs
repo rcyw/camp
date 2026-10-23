@@ -104,6 +104,29 @@ test("ordered plans preserve acceptance and verification while rejecting malform
   } finally { process.env = previous; globalThis.fetch = originalFetch; }
 });
 
+test('a v5 planner submits explicit DAG dependencies and rejects malformed graphs locally', async () => {
+  const previous = { ...process.env }, originalFetch = globalThis.fetch;
+  const tools = new Map(), calls = [];
+  const item = (key, dependsOnKeys) => ({ key, title: key, description: 'Change owned files', acceptance: 'Expected output', verification: 'node --test', dependsOnKeys });
+  try {
+    Object.assign(process.env, env, { CAMP_PROTOCOL_VERSION: '5' });
+    globalThis.fetch = async (_url, init) => { calls.push(JSON.parse(init.body)); return Response.json({ plan: { revision: 2 } }); };
+    apply({ tools: { register(tool) { tools.set(tool.name, tool); return () => {}; } }, systemPrompt: { section() {} }, on() {} });
+    const submit = tools.get('camp_submit_plan');
+    assert.equal(submit.parameters.properties.tasks.maxItems, 6);
+    assert.ok(submit.parameters.properties.tasks.items.required.includes('dependsOnKeys'));
+    await assert.rejects(() => submit.execute({ summary: 'Graph', tasks: [item('a', ['b']), item('b', ['a'])] }, {}), /cycle/);
+    await assert.rejects(() => submit.execute({ summary: 'Graph', tasks: [item('a', undefined)] }, {}), /parent keys/);
+    assert.equal(calls.length, 0);
+    const tasks = [item('a', []), item('b', []), item('join', ['b', 'a'])];
+    await submit.execute({ summary: 'Graph', tasks }, {});
+    assert.equal(calls[0].planRevision, 2);
+    assert.deepEqual(calls[0].tasks[2].dependsOnKeys, ['a', 'b']);
+    assert.equal(calls[0].epoch, 2);
+    assert.equal(calls[0].runId, 'run-1');
+  } finally { process.env = previous; globalThis.fetch = originalFetch; }
+});
+
 test("blocking questions, answers and escalation use durable run-scoped endpoints without a claim or a polling loop", async () => {
   const previous = { ...process.env }; const originalFetch = globalThis.fetch;
   const tools = new Map(); const calls = [];

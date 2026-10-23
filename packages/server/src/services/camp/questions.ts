@@ -45,7 +45,7 @@ export async function suspendForQuestion(tx: DatabaseExecutor, room: Room, goal:
   if (binding.kind === "clarification") throw new CampError(409, "clarification_must_answer", "Clarifications must answer or escalate instead of recursively suspending");
   await tx.update(campTasks).set({ status: "waiting_question", inputCandidate: candidate }).where(eq(campTasks.taskId, binding.taskId));
   await tx.update(campQuestions).set({ status: question.needsHuman ? "awaiting_human" : "awaiting_role", candidate }).where(eq(campQuestions.id, question.id));
-  await tx.update(campGoals).set({ ...(goal.planMode === "parallel_pair" && binding.planItemKey ? {} : { currentCandidate: candidate }), status: goal.planMode === "parallel_pair" ? "running" : question.needsHuman ? "waiting_question" : "running" }).where(eq(campGoals.id, goal.id));
+  await tx.update(campGoals).set({ ...(["parallel_pair", "bounded_dag"].includes(goal.planMode) && binding.planItemKey ? {} : { currentCandidate: candidate }), status: ["parallel_pair", "bounded_dag"].includes(goal.planMode) ? "running" : question.needsHuman ? "waiting_question" : "running" }).where(eq(campGoals.id, goal.id));
   if (!question.needsHuman) {
     const taskId = await enqueueStage(tx, room, goal, { kind: "clarification", candidate, role: question.toRole, questionId: question.id, feedback: `Answer this blocking question with camp_answer_question, or escalate it to a human if you cannot answer. Do not ask a second question.\nQuestion ${question.id} from ${question.fromRole}: ${question.content}` });
     await tx.update(campQuestions).set({ clarificationTaskId: taskId }).where(eq(campQuestions.id, question.id));

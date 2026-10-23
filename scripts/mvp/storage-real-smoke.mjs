@@ -12,6 +12,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { CampRuntime } from '../../packages/camp-runtime/src/index.mjs';
 import { exportCandidate } from '../../packages/camp-runtime/src/export.mjs';
 import { exportNativeStore } from '../../packages/camp-runtime/src/native-store.mjs';
+import { privateArtifactRequest, uploadPrivateBundle, downloadPrivateBundle } from '../../packages/camp-runtime/src/private-artifacts.mjs';
 import { createWorkerDeclaration } from '../../packages/camp-protocol/src/index.js';
 import { superviseOwnedChild } from './owned-child.mjs';
 
@@ -31,7 +32,15 @@ assert.ok(source?.resultReady, 'A completed parallel infrastructure fixture is r
 const folder = resolve('.camp/storage', `camp-storage-${Date.now().toString(36)}`);
 await mkdir(folder, { recursive: true, mode: 0o700 });
 const sourceHome = join(source.folder, 'runtime'), targetHome = join(folder, 'restored-runtime');
-const bundle = join(folder, 'backup'), imageId = prior.imageId;
+const sourceBundle = join(folder, 'backup'), imageId = prior.imageId;
+let bundle = sourceBundle;
+const privateTransport = process.env.CAMP_STORAGE_TRANSPORT === 'private_api';
+const targetSocket = process.env.CAMP_STORAGE_TARGET_DOCKER_SOCKET;
+if (targetSocket && !privateTransport) throw new Error('A separate destination daemon requires explicit private API transport');
+const sourceDockerSocket = process.env.CAMP_DOCKER_SOCKET ?? '/var/run/docker.sock';
+const sourceDaemonId = (await execute('docker', ['--host', 'unix://' + sourceDockerSocket, 'info', '--format', '{{.ID}}'])).stdout.trim();
+const targetDaemonId = targetSocket ? (await execute('docker', ['--host', 'unix://' + targetSocket, 'info', '--format', '{{.ID}}'])).stdout.trim() : sourceDaemonId;
+if (targetSocket) assert.notEqual(targetDaemonId, sourceDaemonId, 'Independent-daemon acceptance requires two actual Docker identities');
 const seed = JSON.parse(await readFile('.dev-env-camp.json', 'utf8'));
 const login = await fetch(apiUrl + '/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: seed.user.email, password: seed.user.password }), redirect: 'error', signal: AbortSignal.timeout(10000) });
 assert.equal(login.status, 200);
@@ -51,11 +60,12 @@ async function worker(path, body, expected = 200) {
 }
 const storagePath = `/camp/rooms/${source.roomId}/storage`;
 const operationsPath = `/camp/rooms/${source.roomId}/storage-operations`;
-const envFor = (home, backup = bundle) => ({ PATH: process.env.PATH, LANG: 'C.UTF-8', CAMP_API_URL: apiUrl, CAMP_WORKER_TOKEN: token, CAMP_RUNTIME_HOME: home, CAMP_RUNTIME_IMAGE: imageId, CAMP_TOOLCHAIN_BUNDLE: toolchain, CAMP_STORAGE_BUNDLE: backup, CAMP_WORKER_ID: 'storage-acceptance', CAMP_VERIFICATION_HARNESSES: join(source.folder, 'harnesses.json') });
+const envFor = (home, backup = bundle) => ({ ...(targetSocket && home !== sourceHome ? { CAMP_DOCKER_SOCKET: targetSocket } : {}), PATH: process.env.PATH, LANG: 'C.UTF-8', CAMP_API_URL: apiUrl, CAMP_WORKER_TOKEN: token, CAMP_RUNTIME_HOME: home, CAMP_RUNTIME_IMAGE: imageId, CAMP_TOOLCHAIN_BUNDLE: toolchain, CAMP_STORAGE_BUNDLE: backup, CAMP_WORKER_ID: 'storage-acceptance', CAMP_VERIFICATION_HARNESSES: join(source.folder, 'harnesses.json') });
 async function cli(command, operationId, home, backup = bundle) {
   return execute(process.execPath, ['packages/camp-runtime/scripts/storage.mjs', command, '--operation', operationId], { timeout: 180000, maxBuffer: 1024 * 1024, env: envFor(home, backup) });
 }
-let operationId, owner, sourceMoved = false, sourceHomeMoved = false, firstTargetMoved = false, success = false;
+let operationId, owner, sourceMoved = false, sourceHomeMoved = false, firstTargetMoved = false, sourceBundleMoved = false, success = false;
+const unavailableBundle = sourceBundle + '-unavailable-during-transport-proof';
 const sourcePath = join(source.folder, 'project'), unavailableSource = join(source.folder, 'project-unavailable-during-storage-proof');
 const unavailableHome = join(source.folder, 'runtime-unavailable-during-storage-proof');
 const unavailableTarget = join(folder, 'restored-runtime-unavailable-during-proof');
@@ -90,6 +100,13 @@ try {
   const backupOperation = afterBackup.operations.find(row => row.id === operationId);
   assert.equal(backupOperation.phase, 'completed'); assert.ok(backupOperation.backupReceipt);
   assert.equal(afterBackup.maintenance, false);
+  let transferArtifact, lostUploadAckRecovered = false, interruptedDownloadRecovered = false;
+  if (privateTransport) {
+    const request = privateArtifactRequest(envFor(sourceHome)); let loseAck = true;
+    const upload = { request: async (path, options) => { const value = await request(path, options); if (loseAck && options?.method === 'PUT') { loseAck = false; throw new Error('Injected lost upload acknowledgement'); } return value; }, operationId, receipt: backupOperation.backupReceipt, bundlePath: sourceBundle };
+    await assert.rejects(uploadPrivateBundle(upload), /lost upload acknowledgement/);
+    transferArtifact = await uploadPrivateBundle(upload); assert.equal(transferArtifact.state, 'ready'); lostUploadAckRecovered = true;
+  }
   const migrationRequest = { requestId: randomUUID(), kind: 'migration', expectedEpoch: initial.epoch, expectedAcceptedRevision: before.room.acceptedHead.revision, backupOperationId: operationId };
   const migration = await human(operationsPath, migrationRequest, 201);
   const backupId = operationId;
@@ -97,6 +114,14 @@ try {
   const discovery = await worker(`/storage-operations/${operationId}`);
   assert.equal(discovery.operation.phase, 'backup_ready');
   assert.equal(discovery.plan.backupOperationId, backupId);
+  if (privateTransport) {
+    await rename(sourceBundle, unavailableBundle); sourceBundleMoved = true;
+    bundle = join(folder, 'received-over-api');
+    const request = privateArtifactRequest(envFor(targetHome)); let interrupt = true;
+    const download = { request: async (path, options) => { if (interrupt && path.endsWith('/parts/1')) { interrupt = false; throw new Error('Injected interrupted download'); } return request(path, options); }, operationId, receipt: discovery.operation.backupReceipt, bundlePath: bundle };
+    await assert.rejects(downloadPrivateBundle(download), /interrupted download/);
+    const received = await downloadPrivateBundle(download); assert.equal(received.id, transferArtifact.id); interruptedDownloadRecovered = true;
+  }
   // A corrupt copied bundle cannot become a target receipt or replace a Store.
   const corrupt = join(folder, 'corrupt-backup'); await cp(bundle, corrupt, { recursive: true });
   const dbFile = await open(join(corrupt, 'store.sqlite'), 'r+');
@@ -146,7 +171,7 @@ try {
   assert.deepEqual((await human(`/camp/rooms/${source.roomId}`)).room.acceptedHead, before.room.acceptedHead);
   const middleClaim = await worker('/claim', { workerId: originalPool.workerIds[0], protocol: { ...createWorkerDeclaration(), executionPool: { ...originalPool, storageId: firstTargetStorageId } } });
   assert.equal(middleClaim.run, null); assert.equal(middleClaim.compatibility.code, 'storage_mismatch');
-  const runtime = await new CampRuntime({ home: finalHome, imageId, toolchainBundle: toolchain }).ready();
+  const runtime = await new CampRuntime({ home: finalHome, imageId, toolchainBundle: toolchain, ...(targetSocket ? { docker: targetSocket } : {}) }).ready();
   const output = join(folder, 'restored-files');
   await exportCandidate({ runtime, candidate: discovery.plan.acceptedCandidate, roomId: source.roomId, goalId: source.goalId, output });
   for (const side of ['left', 'right']) assert.equal(await readFile(join(output, side + '-note.txt'), 'utf8'), side + '\n');
@@ -188,11 +213,12 @@ try {
   assert.equal(continued.baseCandidate.refId, discovery.plan.acceptedCandidate.refId);
   assert.equal(continued.executionPool.storageId, receipt.targetStorageId);
   assert.notEqual(continued.executionPool.poolId, originalPool.poolId);
-  const result = { event: 'storage_lifecycle_infrastructure_passed', at: new Date().toISOString(), modelCalls: 0, roomId: source.roomId, sourceGoalId: source.goalId, continuationGoalId: nextGoal.id, folder, sourceStorageId: initial.storageId, targetStorageId: receipt.targetStorageId, storageEpoch: secondStorage.epoch, preservedCandidates: receipt.verifiedCandidates, wholeHistoryVerified: true, corruptBundleRejected: true, sourceCheckoutUnavailable: true, sourceHomeUnavailable: true, lostBackupAcknowledgementRecovered: true, originalBackupReusedAfterTargetLoss: true, candidateFilesPreserved: true, backupAndRestoreReplayIdempotent: true, activationCasChecked: true, activationReplayIdempotent: true, historicalGoalsPreserved: true, oldLocationFenced: true, idleIntermediateLocationFenced: true, legacyBypassRejected: true, freshPoolContinuedFromAcceptedHead: true, actualHostCount: 1, independentVolumes: true };
+  const result = { event: 'storage_lifecycle_infrastructure_passed', at: new Date().toISOString(), modelCalls: 0, roomId: source.roomId, sourceGoalId: source.goalId, continuationGoalId: nextGoal.id, folder, sourceStorageId: initial.storageId, targetStorageId: receipt.targetStorageId, storageEpoch: secondStorage.epoch, preservedCandidates: receipt.verifiedCandidates, wholeHistoryVerified: true, corruptBundleRejected: true, sourceCheckoutUnavailable: true, sourceHomeUnavailable: true, lostBackupAcknowledgementRecovered: true, originalBackupReusedAfterTargetLoss: true, candidateFilesPreserved: true, backupAndRestoreReplayIdempotent: true, activationCasChecked: true, activationReplayIdempotent: true, historicalGoalsPreserved: true, oldLocationFenced: true, idleIntermediateLocationFenced: true, legacyBypassRejected: true, freshPoolContinuedFromAcceptedHead: true, actualHostCount: 1, independentVolumes: true, privateApiTransport: privateTransport, independentDockerDaemons: targetDaemonId !== sourceDaemonId, sourceDaemonId, targetDaemonId, ...(privateTransport ? { artifactId: transferArtifact.id, lostUploadAckRecovered, interruptedDownloadRecovered, sourceBundleUnavailableDuringDownload: true } : {}) };
   await writeFile('.camp/storage-infra-latest.json', JSON.stringify(result, null, 2) + '\n', { mode: 0o600 });
   console.log(JSON.stringify(result)); success = true;
 } finally {
   await owner?.stop({ graceMs: 30000 });
+  if (sourceBundleMoved) await rename(unavailableBundle, sourceBundle);
   if (sourceMoved) await rename(unavailableSource, sourcePath);
   if (sourceHomeMoved) await rename(unavailableHome, sourceHome);
   if (firstTargetMoved) await rename(unavailableTarget, targetHome);

@@ -1,7 +1,7 @@
 /** Cordis plugin exposing a leased Camp role's room and progress tools to DSH. */
 import { randomUUID } from "node:crypto";
 import { createRunClient, runContext } from "./client.js";
-import { CAMP_TOOL_SCHEMAS, parsePlanItem, CAMP_LIMITS } from '../../camp-protocol/src/index.js';
+import { CAMP_TOOL_SCHEMAS, CAMP_DAG_PLAN_TOOL_SCHEMA, parsePlanSubmission } from '../../camp-protocol/src/index.js';
 export { pluginProtocol } from './protocol.js';
 
 export const name = "camp-room-tools";
@@ -38,6 +38,7 @@ function reviewCandidate(target) {
 
 /** @param {PluginContext} ctx */
 export function apply(ctx) {
+  const dag = Number(process.env.CAMP_PROTOCOL_VERSION) === 5;
   // Resolve on tool invocation: the same installed bundle can be boot-checked without a live run.
   const client = () => createRunClient(runContext());
   ctx.systemPrompt.section({
@@ -50,7 +51,7 @@ export function apply(ctx) {
       + "Report artifact paths and test evidence; do not claim validation that you did not run. On authorization loss, stop working. "
       + "The room roles are planner, builder, and reviewer. During a review or final_review task (or a legacy reviewer run), verify the immutable candidate named by camp_read_context.reviewTarget, then use camp_review with an explicit approved or changes_requested verdict and test evidence before finishing. A clarification task only answers or escalates its assigned question. "
       + "Preserve the workspace's files unchanged during review; put temporary test or diagnostic files under /tmp and report review notes with camp_review. A modified workspace cannot approve the original candidate. "
-      + "For serial goals, read context.taskKind before acting. During plan, inspect the original requirement and submit one ordered plan with camp_submit_plan; do not implement or change project files. Every item needs explicit acceptance criteria and verification steps. A final text plan is not an accepted plan. If context already contains an accepted plan for this attempt, preserve that exact plan and finish without replacing it. "
+      + "For serial goals, read context.taskKind and context.planMode before acting. During plan, inspect the original requirement and submit one plan with camp_submit_plan; do not implement or change project files. Ordered modes use the item order. In bounded_dag, every node must include dependsOnKeys (an empty array means a root), with at most six nodes, two direct parents per node and two final nodes. Reject cycles and redundant ancestor dependencies; add explicit join nodes when needed. Independent nodes may run concurrently, so give them separate file ownership where possible. Every item needs explicit acceptance criteria and verification steps. The platform integrates multiple parents before execution. A final text plan is not an accepted plan. If context already contains an accepted plan for this attempt, preserve that exact plan and finish without replacing it. "
       + "During build, implement only the current plan item, check its acceptance criteria and report the actual verification. During review, check the current item; during final_review, check the entire original requirement against the authorized combined candidate. "
       + "Use camp_ask_question for a blocking question that needs another role or a human. When its response requiresSuspension is true, stop editing and finish your turn promptly so the supervisor can save your candidate and schedule the recipient. If requiresSuspension is false, use the existing answer and continue instead. Never wait or poll for another role while holding the only worker. "
       + "On a resumed task, read answered questions in context and continue from the mounted saved candidate. Do not ask an already answered question again. Ordinary room notes and progress never request scheduling. "
@@ -69,7 +70,7 @@ export function apply(ctx) {
   /** @param {keyof typeof CAMP_TOOL_SCHEMAS} toolName @param {string} description @param {(args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>} execute */
   function tool(toolName, description, execute) {
     ctx.tools.register({
-      name: toolName, description, parameters: structuredClone(CAMP_TOOL_SCHEMAS[toolName]),
+      name: toolName, description, parameters: structuredClone(toolName === 'camp_submit_plan' && dag ? CAMP_DAG_PLAN_TOOL_SCHEMA : CAMP_TOOL_SCHEMAS[toolName]),
       output: { schema: { type: "object", additionalProperties: true }, render: (_args, value) => [{ type: "text", text: JSON.stringify(value) }] },
       execute: async (args, exec) => execute(object(args), exec.signal),
     });
@@ -89,11 +90,9 @@ export function apply(ctx) {
   tool("camp_handoff", "Suggest the next responsible role with a summary and remaining work. This never changes ownership or completes a task.", (args, signal) => {
     return client().send(`${text(args, "summary")}\n\nRemaining: ${text(args, "remaining")}`, text(args, "to_role"), "handoff", signal);
   });
-  tool("camp_submit_plan", "Planner plan task only: submit one ordered implementation plan. The server persists it before builders can claim work. Repeating the identical plan is idempotent; changing an accepted plan is a conflict.", (args, signal) => {
-    if (!Array.isArray(args.tasks) || args.tasks.length < 1 || args.tasks.length > CAMP_LIMITS.planItems) throw new Error("A Camp plan requires one to five ordered tasks");
-    const tasks = args.tasks.map(parsePlanItem);
-    if (new Set(tasks.map(task => task.key)).size !== tasks.length) throw new Error("Plan task keys must be unique");
-    return client().submitPlan({ summary: text(args, "summary") ?? "", tasks }, signal);
+  tool("camp_submit_plan", "Planner plan task only: submit the implementation plan required by context.planMode. In bounded_dag include dependsOnKeys for every node; other modes use ordered items. The server persists it before builders can claim work. Identical replay is idempotent; changing an accepted plan is a conflict.", (args, signal) => {
+    const plan = parsePlanSubmission({ planRevision: dag ? 2 : 1, summary: text(args, 'summary') ?? '', tasks: args.tasks });
+    return client().submitPlan(plan, signal);
   });
   tool("camp_ask_question", "Suspend work for a blocking question. The supervisor saves your candidate and releases the worker to route the question. After this tool succeeds, stop editing and finish the turn promptly. Use needs_human only for a decision the human must make.", (args, signal) => {
     if (args.needs_human !== undefined && typeof args.needs_human !== "boolean") throw new Error("needs_human must be a boolean");

@@ -9,7 +9,7 @@ import { createModelProxy } from './model-proxy.mjs';
 import { ModelBudget, RunLimitError, runLimits } from './run-limits.mjs';
 import { checkedRunPolicy, completionPolicy, controlledTurnResult, completionSummary } from './run-policy.mjs';
 import { negotiateWorker, assertClaimCompatibility, protocolFailure, unmatchedTaskKind } from './worker-protocol.mjs';
-import { parseCandidate, parseIntegrationInput, parseIntegrationReport } from '../../camp-protocol/src/index.js';
+import { parseCandidate, parseIntegrationInput, parseIntegrationReport, CAMP_DAG_INTEGRATION_ALGORITHM } from '../../camp-protocol/src/index.js';
 import { createChangeSet } from './change-set.mjs';
 import { runTrustedVerification } from './verification.mjs';
 import { inspectWorker, workerApiRequest, workerApiUrl, workerIdForEnvironment } from './worker-preflight.mjs';
@@ -144,11 +144,16 @@ export async function startWorker(options = {}) {
           const integrationInput = parseIntegrationInput(claim.integrationInput);
           parseCandidate(integrationInput.base, { projectId: project.projectId, imageId: project.imageId });
           if (['projectId', 'imageId', 'refKind', 'refId', 'rootId'].some(key => integrationInput.base[key] !== claim.inputCandidate?.[key])) throw new Error('Integration claim changed its frozen baseline');
-          await journal.update(record, { phase: 'integration_preparing', integrationInput });
+          // A DAG join can use an intermediate ancestor as its native merge
+          // base. Display changes still describe the complete Goal baseline.
+          const integrationGoalBaseline = integrationInput.algorithm === CAMP_DAG_INTEGRATION_ALGORITHM
+            ? parseCandidate(claim.goalBaseline, { projectId: project.projectId, imageId: project.imageId })
+            : integrationInput.base;
+          await journal.update(record, { phase: 'integration_preparing', integrationInput, integrationGoalBaseline });
           const stage = async value => {
             controller.signal.throwIfAborted(); lease.assertActive();
             const integrationReport = parseIntegrationReport(value);
-            const integrationChangeSet = integrationReport.status === 'merged' ? await computeChangeSet({ runtime, ownerRun: record.runtime, base: integrationInput.base, target: integrationReport.candidate, signal: controller.signal }) : undefined;
+            const integrationChangeSet = integrationReport.status === 'merged' ? await computeChangeSet({ runtime, ownerRun: record.runtime, base: integrationGoalBaseline, target: integrationReport.candidate, signal: controller.signal }) : undefined;
             controller.signal.throwIfAborted(); lease.assertActive();
             await journal.update(record, { phase: 'integration_result_recorded', integrationReport, ...(integrationChangeSet ? { integrationChangeSet } : {}) });
             await journal.stageCompletion(record, integrationCompletion(record));

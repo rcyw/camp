@@ -214,7 +214,7 @@ export default function CampRoomPanel({ channel }: { channel: Channel }) {
                 ))}
               </ol>
             </section>
-            {canManage && !snapshot.setup && <CampWorkerConnection key={snapshot.room.id} roomId={snapshot.room.id} supportsParallel={snapshot.supportedPlanModes?.includes("parallel_pair")} />}
+            {canManage && !snapshot.setup && <CampWorkerConnection key={snapshot.room.id} roomId={snapshot.room.id} supportsParallel={snapshot.supportedPlanModes?.some(mode => mode === "parallel_pair" || mode === "bounded_dag")} />}
           </>
         )}
       </div>

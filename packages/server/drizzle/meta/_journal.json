@@ -2696,6 +2696,20 @@
       "when": 1793638000000,
       "tag": "0384_camp_storage_maintenance",
       "breakpoints": true
+    },
+    {
+      "idx": 385,
+      "version": "7",
+      "when": 1793639000000,
+      "tag": "0385_camp_bounded_dag",
+      "breakpoints": true
+    },
+    {
+      "idx": 386,
+      "version": "7",
+      "when": 1793640000000,
+      "tag": "0386_camp_private_artifacts",
+      "breakpoints": true
     }
   ]
 }

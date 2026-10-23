@@ -1,8 +1,8 @@
 import { activeStorageOperation, assertStorageWritable } from "./storage";
 import { roomOccupancy } from "./executionPool";
-import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, lte, ne, sql } from "drizzle-orm";
 import { getDb, type DatabaseExecutor } from "../../db/index";
-import { campEvents, campGoals, campOperations, campQuestions, campRooms, campRuns, campTasks, tasks } from "../../db/schema";
+import { campDagNodes, campEvents, campGoals, campOperations, campQuestions, campRooms, campRuns, campTasks, tasks } from "../../db/schema";
 import { createTasks, forceUpdateTaskStatus } from "../taskService";
 import { CampError, DEFAULT_CAMP_BUDGET, DEFAULT_SERIAL_CAMP_BUDGET, type CampBudget, type CampGoalAttemptSummary, type CampWorkflow } from "./types";
 import { assertRoomAdmission, enqueueStage } from "./workflow";
@@ -67,9 +67,10 @@ export async function stopGoal(tx: DatabaseExecutor, room: Room, goal: Goal, rea
     .where(and(eq(campRuns.roomId, room.id), sql`coalesce(${campTasks.goalId}, ${campOperations.goalId}) = ${goal.id}`, sql`coalesce(${campTasks.goalAttempt}, ${campOperations.goalAttempt}) = ${goal.attempt}`, eq(campRuns.status, "running")));
   if (active.length) await tx.update(campRuns).set({ cancelRequestedAt: sql`coalesce(${campRuns.cancelRequestedAt}, clock_timestamp())` }).where(inArray(campRuns.id, active.map(run => run.id)));
   await blockQueuedTasks(tx, room, goal, cancelled ? "cancelled" : "blocked");
+  await tx.update(campDagNodes).set({ status: "blocked" }).where(and(eq(campDagNodes.goalId, goal.id), eq(campDagNodes.goalAttempt, goal.attempt), ne(campDagNodes.status, "approved")));
   await tx.update(campOperations).set({ status: cancelled ? "cancelled" : "blocked" }).where(and(eq(campOperations.goalId, goal.id), eq(campOperations.goalAttempt, goal.attempt), eq(campOperations.status, "queued")));
   const status = cancelled ? active.length ? "cancelling" : "cancelled" : "needs_attention";
-  await tx.update(campGoals).set({ status, reason, completedAt: active.length ? null : sql`clock_timestamp()` }).where(eq(campGoals.id, goal.id));
+  await tx.update(campGoals).set({ ...(goal.planMode === "bounded_dag" && goal.dagDelivery && goal.dagDelivery.status !== "ready" ? { dagDelivery: { ...goal.dagDelivery, status: "blocked" as const } } : {}), status, reason, completedAt: active.length ? null : sql`clock_timestamp()` }).where(eq(campGoals.id, goal.id));
   if (goal.status !== status || goal.reason !== reason) await tx.insert(campEvents).values({ roomId: room.id, goalId: goal.id, type: status, content: reason });
 }
 
@@ -148,7 +149,7 @@ export async function retryGoal(roomId: string, goalId: string, userId: string, 
     if (goal.workflow === "serial" && goal.baseHeadRevision !== room.acceptedRevision) throw new CampError(409, "stale_baseline", "This goal's Room baseline was replaced; submit a new goal from the accepted head");
     await tx.update(campQuestions).set({ status: "cancelled" }).where(and(eq(campQuestions.goalId, goal.id), eq(campQuestions.goalAttempt, goal.attempt), inArray(campQuestions.status, ["pending", "awaiting_role", "awaiting_human"])));
     const previous: CampGoalAttemptSummary = { attempt: goal.attempt, budget: goal.budget, status: goal.status, reason: goal.reason, usage: { runs: goal.runCount, reviewRounds: goal.reviewRounds, elapsedSeconds: goal.startedAt ? Math.max(0, Math.floor(((goal.completedAt?.getTime() ?? Date.now()) - goal.startedAt.getTime()) / 1000)) : 0 }, startedAt: goal.startedAt?.toISOString() ?? null, deadlineAt: goal.deadlineAt?.toISOString() ?? null, completedAt: goal.completedAt?.toISOString() ?? null };
-    const [next] = await tx.update(campGoals).set({ attempt: goal.attempt + 1, attemptHistory: [...goal.attemptHistory, previous], budget: normalizeBudget(budget ?? goal.budget, goal.workflow), status: "queued", reason: null, runCount: 0, reviewRounds: 0, startedAt: null, deadlineAt: null, completedAt: null, currentCandidate: goal.baseCandidate, finalCandidate: null, summary: null, verificationRepairs: 0, reviewedItems: {} }).where(eq(campGoals.id, goalId)).returning();
+    const [next] = await tx.update(campGoals).set({ attempt: goal.attempt + 1, attemptHistory: [...goal.attemptHistory, previous], budget: normalizeBudget(budget ?? goal.budget, goal.workflow), status: "queued", reason: null, runCount: 0, reviewRounds: 0, startedAt: null, deadlineAt: null, completedAt: null, currentCandidate: goal.baseCandidate, finalCandidate: null, summary: null, verificationRepairs: 0, reviewedItems: {}, dagDelivery: null }).where(eq(campGoals.id, goalId)).returning();
     const result = await createAttemptTasks(tx, room, next, "user", userId, goal.initialDependsOn);
     await tx.insert(campEvents).values({ roomId, goalId, type: "goal_retried", content: `Human retry started attempt ${next.attempt}` });
     return { ...result, goalId };

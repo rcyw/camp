@@ -132,6 +132,24 @@ test("a missing source receipt has an explicit collapsed recovery command that c
   assert.equal(within(recovery).queryByRole("button", { name: "Activate verified target" }), null);
 });
 
+test("private transfer commands pin the original backup for upload and the current migration for download without invoking transport", async () => {
+  const copied: string[] = [];
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (value: string) => { copied.push(value); } } });
+  const migration = operation({ phase: "backup_ready", originBackupOperationId: backupId, backupReceipt: backupReceipt(backupId) });
+  const view = renderWithIntl(<CampStoragePanel roomId={roomId} storage={storage({ operations: [migration] })} acceptedRevision={3} canManage busy={false} onAction={unusedAction} />);
+  const transfer = screen.getByTestId("camp-storage-transfer") as HTMLDetailsElement; assert.equal(transfer.open, false);
+  await act(async () => { transfer.open = true; fireEvent(transfer, new window.Event("toggle")); });
+  const upload = within(transfer).getByTestId("camp-storage-command-upload"), download = within(transfer).getByTestId("camp-storage-command-download");
+  assert.ok(upload.textContent?.includes(`artifacts.mjs upload --operation ${backupId}`));
+  assert.ok(download.textContent?.includes(`artifacts.mjs download --operation ${operationId}`));
+  fireEvent.click(within(upload).getByRole("button", { name: "Copy" })); fireEvent.click(within(download).getByRole("button", { name: "Copy" }));
+  await waitFor(() => assert.deepEqual(copied, [storageCommand(backupId, "upload"), storageCommand(operationId, "download")]));
+  assert.ok(within(transfer).getByText(/restore verification and explicit activation are still required/));
+  for (const command of copied) { assert.equal(command.includes(candidate.refId), false); assert.equal(command.includes("TOKEN="), false); assert.equal(command.includes("--bundle"), false); }
+  view.rerender(<TestIntlProvider><CampStoragePanel roomId={roomId} storage={storage({ operations: [migration] })} acceptedRevision={3} canManage={false} busy={false} onAction={unusedAction} /></TestIntlProvider>);
+  assert.equal(screen.queryByTestId("camp-storage-transfer"), null);
+});
+
 test("restore readiness requires an explicit administrator activation using the verified target and source epoch", async () => {
   const restored = operation({ phase: "restore_ready", canActivate: true, backupReceipt: backupReceipt(), restoreReceipt: { ...backupReceipt(), targetStorageId: target, verifiedCandidates: 1, historyVerified: true } });
   let current = snapshot(storage({ maintenance: true, operations: [restored], canBackup: false, canMigrate: false }));

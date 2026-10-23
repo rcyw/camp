@@ -2,16 +2,19 @@ import { createHash } from 'node:crypto';
 import { mkdir, lstat, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { parseIntegrationInput, serializeIntegrationInput, parseIntegrationReport, parseCandidate, CAMP_INTEGRATION_LIMITS } from '../../camp-protocol/src/index.js';
+import { parseIntegrationInput, serializeIntegrationInput, parseIntegrationReport, parseCandidate, CAMP_INTEGRATION_LIMITS, CAMP_DAG_INTEGRATION_ALGORITHM } from '../../camp-protocol/src/index.js';
 import { atomicJson, acquireWorkerLock } from './durable-state.mjs';
 import { regularBytes } from './toolchain.mjs';
 import { materializeCandidate } from './export.mjs';
 import { removeOwnedDirectory, exportPath } from './safe-export.mjs';
 import { integrationTreeLimits, inventoryIntegrationTree, planIntegrationTree, compareIntegrationTree, treeDigest } from './integration-tree.mjs';
+import { proveUniqueMergeBase } from './integration-ancestry.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const commitId = /^12[a-f0-9]{64}$/, layerId = /^32[a-f0-9]{64}$/;
 const inspection = cause => Object.assign(new Error('Integration native outcome requires inspection; no mutation was retried', { cause }), { code: 'camp_integration_inspection_required', requiresInspection: true });
+const ancestryRejected = () => Object.assign(new Error('Integration ancestry is incomplete or unsupported'), { code: 'camp_integration_ancestry_rejected' });
+const inspectionBranch = (selected, ref) => `ci-${hash(selected.identity.runId).slice(0, 16)}-${selected.inputDigest.slice(0, 8)}-h-${hash(ref).slice(0, 24)}`;
 async function read(path, maximum = 1024 * 1024) {
   try { return JSON.parse(await regularBytes(path, maximum)); }
   catch (error) { if (error.code === 'ENOENT') return null; throw inspection(error); }
@@ -25,6 +28,7 @@ function context(runtime, ownerRun, value) {
 }
 function checkedIntent(value, selected) {
   if (!value || value.schemaVersion !== 1 || value.inputDigest !== selected.inputDigest || serializeIntegrationInput(value.input) !== serializeIntegrationInput(selected.input) || value.owner?.runId !== selected.identity.runId || value.owner.prefix !== selected.identity.prefix || JSON.stringify(value.branches) !== JSON.stringify(selected.branches) || typeof value.mutationStarted !== 'boolean') throw inspection();
+  if (selected.input.algorithm === CAMP_DAG_INTEGRATION_ALGORITHM && (!Array.isArray(value.inspections) || value.inspections.length > 4096 || value.inspections.some(item => !item || !commitId.test(item.refId ?? '') || item.branch !== inspectionBranch(selected, item.refId)) || new Set(value.inspections.map(item => item.refId)).size !== value.inspections.length)) throw inspection();
   return value;
 }
 function report(selected, status, conflicts = [], candidate = null) {
@@ -82,11 +86,13 @@ export async function recoverTrustedIntegration({ runtime, ownerRun, integration
   const raw = await read(join(ownerRun.folder, 'integration-result.json'), CAMP_INTEGRATION_LIMITS.maxPayloadBytes);
   const validation = await read(join(ownerRun.folder, 'integration-validation.json'));
   const native = await read(join(ownerRun.folder, 'integration-native-result.json'));
-  if (!intent) return raw || validation || native ? { status: 'requires_inspection', phase: 'orphan_result' } : { status: 'missing' };
+  const ancestry = selected.input.algorithm === CAMP_DAG_INTEGRATION_ALGORITHM ? await read(join(ownerRun.folder, 'integration-ancestry.json'), 4 * 1024 ** 2) : null;
+  if (!intent) return raw || validation || native || ancestry ? { status: 'requires_inspection', phase: 'orphan_result' } : { status: 'missing' };
   checkedIntent(intent, selected);
   if (raw && validation) {
     const value = parseIntegrationReport(raw);
     if (validation.schemaVersion !== 1 || value.inputDigest !== selected.inputDigest || validation.inputDigest !== selected.inputDigest || validation.ownerRunId !== ownerRun.runId || validation.reportDigest !== hash(JSON.stringify(value)) || (value.status === 'merged' && (!/^[a-f0-9]{64}$/.test(validation.expectedTreeDigest ?? '') || validation.actualTreeDigest !== validation.expectedTreeDigest || !nativeSafe(native, selected) || validation.nativeDigest !== hash(JSON.stringify(native)) || native.root !== value.candidate.rootId || (native.head !== null && native.head !== value.candidate.refId)))) throw inspection();
+    if (value.status === 'merged' && selected.input.algorithm === CAMP_DAG_INTEGRATION_ALGORITHM && (!ancestry || ancestry.schemaVersion !== 1 || ancestry.inputDigest !== selected.inputDigest || ancestry.ownerRunId !== ownerRun.runId || ancestry.proof?.mergeBase !== selected.input.base.refId || !Array.isArray(ancestry.proof.nodes) || ancestry.proof.nodes.length > 4096 || validation.ancestryDigest !== hash(JSON.stringify(ancestry)))) throw inspection();
     if (value.candidate) {
       const project = await runtime.loadProject(selected.input.base.projectId);
       await runtime.verifyCandidate(project, value.candidate, { signal });
@@ -95,7 +101,7 @@ export async function recoverTrustedIntegration({ runtime, ownerRun, integration
     }
     return { status: 'validated', report: value };
   }
-  if (!intent.mutationStarted && !raw && !validation && !native && ['materializing', 'preflight'].includes(intent.phase)) return { status: 'preparing', phase: intent.phase };
+  if (!intent.mutationStarted && !raw && !validation && !native && !ancestry && ['materializing', 'preflight'].includes(intent.phase)) return { status: 'preparing', phase: intent.phase };
   return { status: 'requires_inspection', phase: intent.phase };
 }
 
@@ -111,7 +117,7 @@ export async function runTrustedIntegration({ runtime, ownerRun, integrationInpu
     if (recovered.status === 'validated') { await onResult(recovered.report); return recovered.report; }
     if (recovered.status === 'requires_inspection') throw inspection();
     if (recovered.status === 'preparing') await runtime.cleanupAttempt(ownerRun.prefix);
-    const intent = { schemaVersion: 1, inputDigest: selected.inputDigest, input: selected.input, owner: { runId: ownerRun.runId, prefix: ownerRun.prefix }, branches: selected.branches, phase: 'materializing', mutationStarted: false };
+    const intent = { schemaVersion: 1, inputDigest: selected.inputDigest, input: selected.input, owner: { runId: ownerRun.runId, prefix: ownerRun.prefix }, branches: selected.branches, ...(selected.input.algorithm === CAMP_DAG_INTEGRATION_ALGORITHM ? { inspections: [] } : {}), phase: 'materializing', mutationStarted: false };
     const persist = async (phase, mutationStarted = intent.mutationStarted) => {
       Object.assign(intent, { phase, mutationStarted });
       await atomicJson(join(ownerRun.folder, 'integration-intent.json'), intent);
@@ -145,7 +151,7 @@ export async function runTrustedIntegration({ runtime, ownerRun, integrationInpu
     }
     await persist('preflight');
     const plan = planIntegrationTree(...snapshots);
-    if (plan.status !== 'ready') return await finish(report(selected, plan.status, plan.conflicts));
+    if (plan.status !== 'ready' && selected.input.algorithm !== CAMP_DAG_INTEGRATION_ALGORITHM) return await finish(report(selected, plan.status, plan.conflicts));
     for (const [index, key] of ['left', 'right'].entries()) {
       await persist(`forking_${key}`, true);
       if (await branchInfo(runtime, project, selected.branches[key], signal)) throw inspection();
@@ -153,9 +159,50 @@ export async function runTrustedIntegration({ runtime, ownerRun, integrationInpu
       catch (error) { throw inspection(error); }
       if (!atCandidate(await branchInfo(runtime, project, selected.branches[key], signal), selected.input.parents[index].candidate)) throw inspection();
     }
-    const lines = [];
-    for (const [index, key] of ['left', 'right'].entries()) lines.push(await firstParentLine(runtime, project, selected.branches[key], selected.input.parents[index].candidate, selected.input.base, signal));
-    if (lines.some(line => !line) || [...lines[0]].some(id => id !== selected.input.base.refId && lines[1].has(id))) return await finish(report(selected, 'rejected', [{ path: '.', reason: 'unsupported' }]));
+    let ancestry;
+    if (selected.input.algorithm === CAMP_DAG_INTEGRATION_ALGORITHM) {
+      const named = new Map(selected.input.parents.map((parent, index) => [parent.candidate.refId, selected.branches[index === 0 ? 'left' : 'right']]));
+      const readLine = async (ref, { stopAt, stopRefs, limit }) => {
+        let branch = named.get(ref);
+        if (!branch) {
+          branch = inspectionBranch(selected, ref);
+          if (await branchInfo(runtime, project, branch, signal)) throw inspection();
+          intent.inspections.push({ branch, refId: ref });
+          await persist('inspecting_ancestry', true);
+          try { await runtime.sdk(project, 'branch.fork', [branch, ref], project, { signal }); } catch (error) { throw inspection(error); }
+          const inspected = await branchInfo(runtime, project, branch, signal);
+          if (inspected?.head !== ref || inspected.forkedFrom !== ref) throw inspection();
+          named.set(ref, branch);
+        }
+        const rows = [], seen = new Set(); let position = 0, next = ref;
+        for (;;) {
+          const page = await runtime.sdk(project, 'branch.list_commits', [branch, 128, position], project, { signal });
+          if (!page || !Array.isArray(page.items) || !page.items.length) throw ancestryRejected();
+          for (const item of page.items) {
+            if (item.id !== next || seen.has(item.id) || rows.length >= limit) throw ancestryRejected();
+            seen.add(item.id); rows.push(item);
+            if (item.id === stopAt || stopRefs.has(item.id) || item.parent === null) return rows;
+            next = item.parent;
+          }
+          if (!page.hasMore || !Number.isSafeInteger(page.nextPagePos) || page.nextPagePos <= position) throw ancestryRejected();
+          position = page.nextPagePos;
+        }
+      };
+      try {
+        const proof = await proveUniqueMergeBase({ base: selected.input.base, parents: selected.input.parents.map(parent => parent.candidate), readLine, signal });
+        ancestry = { schemaVersion: 1, inputDigest: selected.inputDigest, ownerRunId: ownerRun.runId, proof };
+        if (Buffer.byteLength(JSON.stringify(ancestry)) > 4 * 1024 ** 2) throw ancestryRejected();
+        await atomicJson(join(ownerRun.folder, 'integration-ancestry.json'), ancestry);
+      } catch (error) {
+        if (error.code !== 'camp_integration_ancestry_rejected') throw error;
+        return await finish(report(selected, 'rejected', [{ path: '.', reason: 'unsupported' }]));
+      }
+    } else {
+      const lines = [];
+      for (const [index, key] of ['left', 'right'].entries()) lines.push(await firstParentLine(runtime, project, selected.branches[key], selected.input.parents[index].candidate, selected.input.base, signal));
+      if (lines.some(line => !line) || [...lines[0]].some(id => id !== selected.input.base.refId && lines[1].has(id))) return await finish(report(selected, 'rejected', [{ path: '.', reason: 'unsupported' }]));
+    }
+    if (plan.status !== 'ready') return await finish(report(selected, plan.status, plan.conflicts));
     if (await branchInfo(runtime, project, selected.branches.output, signal)) throw inspection();
     await persist('merging', true);
     let native;
@@ -185,7 +232,7 @@ export async function runTrustedIntegration({ runtime, ownerRun, integrationInpu
     const actual = await inventoryIntegrationTree(directory, { signal });
     const mismatches = compareIntegrationTree(plan.expected, actual);
     if (mismatches.length) return await finish(report(selected, 'rejected', mismatches));
-    return await finish(report(selected, 'merged', [], candidate), { expectedTreeDigest: plan.expectedDigest, actualTreeDigest: treeDigest(actual), nativeDigest: hash(JSON.stringify(native)) });
+    return await finish(report(selected, 'merged', [], candidate), { expectedTreeDigest: plan.expectedDigest, actualTreeDigest: treeDigest(actual), nativeDigest: hash(JSON.stringify(native)), ...(ancestry ? { ancestryDigest: hash(JSON.stringify(ancestry)) } : {}) });
     })();
   } catch (error) { failed = error; }
   finally {

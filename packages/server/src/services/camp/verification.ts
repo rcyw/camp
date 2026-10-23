@@ -94,8 +94,8 @@ export async function goalVerificationSnapshot(goal: Goal, snapshots?: Awaited<R
 
 export async function deliveryResultReady(goal: Goal, operations?: readonly GateOperation[]) {
   if (goal.status !== "completed" || !goal.finalCandidate || !goal.summary) return false;
-  if (operations && !integrationGatePassed(goal, operations)) return false;
-  if (!operations) { try { await requireIntegrationGate(getDb(), goal); } catch (error) { if (error instanceof CampError && error.code === "integration_required") return false; throw error; } }
+  if (operations && goal.planMode !== "bounded_dag" && !integrationGatePassed(goal, operations)) return false;
+  if (!operations || goal.planMode === "bounded_dag") { try { await requireIntegrationGate(getDb(), goal); } catch (error) { if (error instanceof CampError && error.code === "integration_required") return false; throw error; } }
   if (!needsVerification(goal)) return true;
   if (operations) return verificationGatePassed(latestVerificationOperation(operations, goal.finalCandidate, goal.verificationPolicy?.digest), goal.finalCandidate, goal.verificationPolicy?.digest);
   try { await requireVerificationGate(getDb(), goal, goal.finalCandidate); return true; }

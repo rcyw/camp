@@ -1,8 +1,8 @@
 /** Pure wire contracts. No Node, browser, database, DSH or sandbox imports. */
-export const CAMP_PROTOCOL_VERSION = 4;
-export const CAMP_SUPPORTED_PROTOCOL_VERSIONS = Object.freeze([1, 2, 3, 4]);
-export const CAMP_WORKER_VERSION = '0.6.0';
-export const CAMP_PLAN_MODES = Object.freeze(/** @type {const} */ (['sequential', 'same_baseline_pair', 'parallel_pair']));
+export const CAMP_PROTOCOL_VERSION = 5;
+export const CAMP_SUPPORTED_PROTOCOL_VERSIONS = Object.freeze([1, 2, 3, 4, 5]);
+export const CAMP_WORKER_VERSION = '0.7.0';
+export const CAMP_PLAN_MODES = Object.freeze(/** @type {const} */ (['sequential', 'same_baseline_pair', 'parallel_pair', 'bounded_dag']));
 export const CAMP_ROLES = Object.freeze(/** @type {const} */ (['planner', 'builder', 'reviewer']));
 export const CAMP_AGENT_TASK_KINDS = Object.freeze(/** @type {const} */ (['plan', 'build', 'review', 'final_review', 'summary', 'clarification']));
 export const CAMP_TASK_KINDS = Object.freeze(/** @type {const} */ ([...CAMP_AGENT_TASK_KINDS, 'verification', 'integration']));
@@ -13,8 +13,10 @@ export const CAMP_CAPABILITIES_V1 = Object.freeze(/** @type {const} */ ([
 ]));
 export const CAMP_CAPABILITIES_V2 = Object.freeze(/** @type {const} */ ([...CAMP_CAPABILITIES_V1, 'candidate-diff.v1', 'trusted-verification.v1']));
 export const CAMP_CAPABILITIES_V3 = Object.freeze(/** @type {const} */ ([...CAMP_CAPABILITIES_V2, 'trusted-integration.v1']));
-export const CAMP_CAPABILITIES = Object.freeze(/** @type {const} */ ([...CAMP_CAPABILITIES_V3, 'bounded-pair.v1']));
+export const CAMP_CAPABILITIES_V4 = Object.freeze(/** @type {const} */ ([...CAMP_CAPABILITIES_V3, 'bounded-pair.v1']));
+export const CAMP_CAPABILITIES = Object.freeze(/** @type {const} */ ([...CAMP_CAPABILITIES_V4, 'structured-plan.v2', 'bounded-dag.v1']));
 export const CAMP_INTEGRATION_ALGORITHM = 'layerfs-three-way-v1';
+export const CAMP_DAG_INTEGRATION_ALGORITHM = 'layerfs-three-way-v2';
 export const CAMP_INTEGRATION_POLICY = 'reject-overlap-v1';
 export const CAMP_INTEGRATION_LIMITS = Object.freeze({ maxConflicts: 100, maxPayloadBytes: 65536 });
 export const CAMP_CHANGE_LIMITS = Object.freeze({ maxEntries: 500, maxPatchBytes: 16384, maxTotalPatchBytes: 262144, maxPayloadBytes: 524288 });
@@ -25,6 +27,7 @@ export const CAMP_TASK_STATUSES = Object.freeze(/** @type {const} */ (['queued',
 export const CAMP_GOAL_STATUSES = Object.freeze(/** @type {const} */ (['queued', 'running', 'waiting_question', 'cancelling', 'completed', 'cancelled', 'needs_attention']));
 export const CAMP_QUESTION_STATUSES = Object.freeze(/** @type {const} */ (['pending', 'awaiting_role', 'awaiting_human', 'answered', 'cancelled']));
 export const CAMP_LIMITS = Object.freeze({ planItems: 5, planKey: 48, planTitle: 200, planText: 4000, text: 16000, remainingItems: 20, remainingText: 4000 });
+export const CAMP_DAG_LIMITS = Object.freeze({ nodes: 6, parents: 2, sinks: 2 });
 export const DEFAULT_CAMP_BUDGET = Object.freeze({ maxRuns: 12, maxReviewRounds: 3, maxDurationSeconds: 1800 });
 export const DEFAULT_SERIAL_CAMP_BUDGET = Object.freeze({ maxRuns: 24, maxReviewRounds: 10, maxDurationSeconds: 3600 });
 export const DEFAULT_BUDGETS = Object.freeze({ legacy: DEFAULT_CAMP_BUDGET, serial: DEFAULT_SERIAL_CAMP_BUDGET });
@@ -32,6 +35,41 @@ export const DEFAULT_BUDGETS = Object.freeze({ legacy: DEFAULT_CAMP_BUDGET, seri
 /** Operator-only storage contracts are separate from model tools and execution
  * negotiation. Their receipts carry identities, never host paths or secrets. */
 export const CAMP_STORAGE_LIMITS = Object.freeze({ maxCandidates: 4096, maxPlanBytes: 8 * 1024 * 1024, maxStoreBytes: 1024 ** 4 });
+export const CAMP_ARTIFACT_LIMITS = Object.freeze({ partBytes: 8 * 1024 ** 2, maxStoreBytes: 16 * 1024 ** 3, maxManifestBytes: 512 * 1024, roomBytes: 64 * 1024 ** 3, pendingPerRoom: 2 });
+
+/** Private, immutable cold bundles only. A transfer is not a proof of native
+ * candidate reachability; quarantined restoration must still verify history.
+ * @param {unknown} value @returns {CampPrivateArtifactManifest} */
+export function parsePrivateArtifactManifest(value) {
+  const input = object(value, 'Private artifact'); only(input, ['schemaVersion', 'format', 'files'], 'Private artifact');
+  if (input.schemaVersion !== 1 || input.format !== 'camp-native-store-v1' || !Array.isArray(input.files) || input.files.length !== 3) throw new CampProtocolError('invalid_artifact', 'Transfer requires the three-file native Store bundle');
+  const names = ['manifest.json', 'project.record', 'store.sqlite'];
+  const files = input.files.map(value => {
+    const file = object(value, 'Artifact file'); only(file, ['name', 'bytes', 'sha256', 'parts'], 'Artifact file');
+    const index = names.indexOf(/** @type {string} */ (file.name));
+    const maxBytes = [9 * 1024 ** 2, 65536, CAMP_ARTIFACT_LIMITS.maxStoreBytes][index];
+    if (index < 0 || !Number.isSafeInteger(file.bytes) || /** @type {number} */ (file.bytes) < (index === 2 ? 512 : 1) || /** @type {number} */ (file.bytes) > maxBytes || !Array.isArray(file.parts) || file.parts.length !== Math.ceil(/** @type {number} */ (file.bytes) / CAMP_ARTIFACT_LIMITS.partBytes)) throw new CampProtocolError('invalid_artifact', 'Artifact file exceeds its name, size or part budget');
+    let remaining = /** @type {number} */ (file.bytes);
+    const parts = file.parts.map(value => {
+      const part = object(value, 'Artifact part'); only(part, ['bytes', 'sha256'], 'Artifact part');
+      const bytes = Math.min(remaining, CAMP_ARTIFACT_LIMITS.partBytes);
+      if (part.bytes !== bytes) throw new CampProtocolError('invalid_artifact', 'Artifact parts must cover the exact file in bounded order');
+      remaining -= bytes;
+      return { bytes, sha256: storageHash(part.sha256, 'Part digest') };
+    });
+    return { name: /** @type {'manifest.json'|'project.record'|'store.sqlite'} */ (file.name), bytes: /** @type {number} */ (file.bytes), sha256: storageHash(file.sha256, 'File digest'), parts };
+  });
+  if (new Set(files.map(file => file.name)).size !== 3) throw new CampProtocolError('invalid_artifact', 'Artifact files must be unique');
+  files.sort((a, b) => names.indexOf(a.name) - names.indexOf(b.name));
+  const result = { schemaVersion: /** @type {1} */ (1), format: /** @type {'camp-native-store-v1'} */ ('camp-native-store-v1'), files };
+  if (new TextEncoder().encode(JSON.stringify(result)).length > CAMP_ARTIFACT_LIMITS.maxManifestBytes) throw new CampProtocolError('invalid_artifact', 'Artifact metadata exceeds its byte budget');
+  return result;
+}
+/** @param {unknown} value */
+export function serializePrivateArtifactManifest(value) { return JSON.stringify(parsePrivateArtifactManifest(value)); }
+
+/** @typedef {{schemaVersion:1,format:'camp-native-store-v1',files:{name:'manifest.json'|'project.record'|'store.sqlite',bytes:number,sha256:string,parts:{bytes:number,sha256:string}[]}[]}} CampPrivateArtifactManifest */
+/** @typedef {{schemaVersion:1,id:string,state:'uploading'|'ready',manifestDigest:string,manifest:CampPrivateArtifactManifest,received:number[]}} CampPrivateArtifact */
 
 /** @param {unknown} value @param {string} field @returns {string} */
 function storageUuid(value, field) {
@@ -283,7 +321,7 @@ export function createWorkerDeclaration(workerVersion = CAMP_WORKER_VERSION) {
 /** A model plugin never advertises roleless infrastructure authority.
  * @returns {CampWorkerDeclaration} */
 export function createPluginDeclaration() {
-  return { ...createWorkerDeclaration(), taskKinds: [...CAMP_AGENT_TASK_KINDS], capabilities: [...CAMP_CAPABILITIES_V1, 'candidate-diff.v1'] };
+  return { ...createWorkerDeclaration(), taskKinds: [...CAMP_AGENT_TASK_KINDS], capabilities: [...CAMP_CAPABILITIES_V1, 'candidate-diff.v1', 'structured-plan.v2'] };
 }
 /** @returns {CampServerProtocol} */
 export function serverProtocol() {
@@ -308,6 +346,7 @@ export function getTaskRequirements(input) {
   const trusted = input.taskKind === 'verification';
   const capabilities = input.taskKind === 'integration' ? ['layerfs.candidate.v1', 'candidate-diff.v1', 'trusted-integration.v1'] : trusted ? ['layerfs.candidate.v1', 'candidate-diff.v1', 'trusted-verification.v1'] : serial ? [...CAMP_CAPABILITIES_V1, ...(protocolVersion !== null && protocolVersion >= 2 ? ['candidate-diff.v1'] : [])] : ['dsh.acp.v1', 'layerfs.candidate.v1', 'candidate-review.v1'];
   if (protocolVersion !== null && protocolVersion >= 4) capabilities.push('bounded-pair.v1');
+  if (protocolVersion !== null && protocolVersion >= 5) capabilities.push(...(trusted || input.taskKind === 'integration' ? ['bounded-dag.v1'] : ['structured-plan.v2', 'bounded-dag.v1']));
   const harnesses = trusted ? input.verificationPolicy?.policy.checks.flatMap(check => check.harness ? [check.harness] : []) ?? [] : [];
   return { protocolVersion, workflow: input.workflow, taskKind: input.taskKind, refKinds, capabilities, ...(protocolVersion !== null && protocolVersion >= 2 ? { harnesses: parseHarnesses(harnesses, true) } : {}), ...(protocolVersion !== null && protocolVersion >= 4 ? { executionPoolRequired: true } : {}) };
 }
@@ -316,7 +355,7 @@ export function getTaskRequirements(input) {
 export function getPluginTaskRequirements(requirements) {
   if (!CAMP_AGENT_TASK_KINDS.includes(/** @type {any} */ (requirements.taskKind))) throw new CampProtocolError('protocol_unsupported', 'A plugin cannot execute system operations', 409);
   const { executionPoolRequired: _pool, ...model } = requirements;
-  return { ...model, capabilities: requirements.capabilities.filter(value => value !== 'bounded-pair.v1') };
+  return { ...model, capabilities: requirements.capabilities.filter(value => value !== 'bounded-pair.v1' && value !== 'bounded-dag.v1') };
 }
 /** Pure check: neither this function nor offered capability names can assign work.
  * @param {CampWorkerDeclaration|null|undefined} declaration @param {CampTaskRequirements} requirements @returns {CampWorkerCompatibility} */
@@ -358,7 +397,7 @@ export function parseCandidate(value, options = {}) {
 }
 /** @param {unknown} value @returns {CampPlanMode} */
 export function parsePlanMode(value) {
-  if (!CAMP_PLAN_MODES.includes(/** @type {any} */ (value))) throw new CampProtocolError('invalid_plan_mode', 'Choose sequential, same_baseline_pair or parallel_pair');
+  if (!CAMP_PLAN_MODES.includes(/** @type {any} */ (value))) throw new CampProtocolError('invalid_plan_mode', 'Choose sequential, same_baseline_pair, parallel_pair or bounded_dag');
   return /** @type {CampPlanMode} */ (value);
 }
 /** Frozen integration authority. Parent order is plan order, not finish time.
@@ -366,7 +405,7 @@ export function parsePlanMode(value) {
  * @param {unknown} value @returns {CampIntegrationInput} */
 export function parseIntegrationInput(value) {
   const input = object(value, 'Integration input'); only(input, ['schemaVersion', 'algorithm', 'policy', 'base', 'parents'], 'Integration input');
-  if (input.schemaVersion !== 1 || input.algorithm !== CAMP_INTEGRATION_ALGORITHM || input.policy !== CAMP_INTEGRATION_POLICY || !Array.isArray(input.parents) || input.parents.length !== 2) throw new CampProtocolError('invalid_integration_input', 'Integration requires the frozen algorithm, conservative policy and exactly two reviewed parents');
+  if (input.schemaVersion !== 1 || ![CAMP_INTEGRATION_ALGORITHM, CAMP_DAG_INTEGRATION_ALGORITHM].includes(/** @type {any} */ (input.algorithm)) || input.policy !== CAMP_INTEGRATION_POLICY || !Array.isArray(input.parents) || input.parents.length !== 2) throw new CampProtocolError('invalid_integration_input', 'Integration requires the frozen algorithm, conservative policy and exactly two reviewed parents');
   const base = parseCandidate(input.base);
   const parents = input.parents.map(value => {
     const parent = object(value, 'Integration parent'); only(parent, ['key', 'runId', 'epoch', 'candidate'], 'Integration parent');
@@ -374,7 +413,7 @@ export function parseIntegrationInput(value) {
     return { key: parent.key, runId: parent.runId, epoch: parent.epoch, candidate: parseCandidate(parent.candidate, { projectId: base.projectId, imageId: base.imageId }) };
   });
   if (parents[0].key === parents[1].key || parents[0].runId === parents[1].runId) throw new CampProtocolError('invalid_integration_input', 'Integration parents must name distinct plan items and producing runs');
-  return { schemaVersion: 1, algorithm: CAMP_INTEGRATION_ALGORITHM, policy: CAMP_INTEGRATION_POLICY, base, parents: /** @type {[CampIntegrationParent,CampIntegrationParent]} */ (parents) };
+  return { schemaVersion: 1, algorithm: /** @type {CampIntegrationAlgorithm} */ (input.algorithm), policy: CAMP_INTEGRATION_POLICY, base, parents: /** @type {[CampIntegrationParent,CampIntegrationParent]} */ (parents) };
 }
 /** Fixed canonical order for host SHA-256 without platform crypto imports.
  * @param {unknown} value */
@@ -383,7 +422,7 @@ export function serializeIntegrationInput(value) { return JSON.stringify(parseIn
 export function parseIntegrationReport(value) {
   const report = object(value, 'Integration report'); only(report, ['schemaVersion', 'inputDigest', 'algorithm', 'policy', 'status', 'candidate', 'conflicts', 'truncated'], 'Integration report');
   const invalid = () => new CampProtocolError('invalid_integration_report', 'Integration requires a bounded exact result or explicit conflicts');
-  if (report.schemaVersion !== 1 || report.algorithm !== CAMP_INTEGRATION_ALGORITHM || report.policy !== CAMP_INTEGRATION_POLICY || typeof report.inputDigest !== 'string' || !/^[a-f0-9]{64}$/.test(report.inputDigest) || !['merged', 'conflict', 'rejected'].includes(report.status) || typeof report.truncated !== 'boolean' || !Array.isArray(report.conflicts) || report.conflicts.length > CAMP_INTEGRATION_LIMITS.maxConflicts) throw invalid();
+  if (report.schemaVersion !== 1 || ![CAMP_INTEGRATION_ALGORITHM, CAMP_DAG_INTEGRATION_ALGORITHM].includes(/** @type {any} */ (report.algorithm)) || report.policy !== CAMP_INTEGRATION_POLICY || typeof report.inputDigest !== 'string' || !/^[a-f0-9]{64}$/.test(report.inputDigest) || !['merged', 'conflict', 'rejected'].includes(report.status) || typeof report.truncated !== 'boolean' || !Array.isArray(report.conflicts) || report.conflicts.length > CAMP_INTEGRATION_LIMITS.maxConflicts) throw invalid();
   const conflicts = report.conflicts.map(value => {
     const conflict = object(value, 'Integration conflict'); only(conflict, ['path', 'reason'], 'Integration conflict');
     const path = conflict.path;
@@ -394,7 +433,7 @@ export function parseIntegrationReport(value) {
   const candidate = report.candidate === null ? null : parseCandidate(report.candidate);
   if (report.status === 'merged' ? !candidate || conflicts.length || report.truncated : candidate !== null || !conflicts.length) throw invalid();
   /** @type {CampIntegrationReport} */
-  const parsed = { schemaVersion: 1, inputDigest: report.inputDigest, algorithm: CAMP_INTEGRATION_ALGORITHM, policy: CAMP_INTEGRATION_POLICY, status: report.status, candidate, conflicts, truncated: report.truncated };
+  const parsed = { schemaVersion: 1, inputDigest: report.inputDigest, algorithm: /** @type {CampIntegrationAlgorithm} */ (report.algorithm), policy: CAMP_INTEGRATION_POLICY, status: report.status, candidate, conflicts, truncated: report.truncated };
   if (new TextEncoder().encode(JSON.stringify(parsed)).length > CAMP_INTEGRATION_LIMITS.maxPayloadBytes) throw invalid();
   return parsed;
 }
@@ -404,19 +443,54 @@ export function parsePlanItem(value) {
   if (typeof record.key !== 'string' || !/^[a-z][a-z0-9_-]{0,47}$/.test(record.key)) throw new CampProtocolError('invalid_plan', 'Plan key must be a lowercase identifier of at most 48 characters');
   return { key: record.key, title: text(record.title, 'title', CAMP_LIMITS.planTitle), description: text(record.description, 'description', CAMP_LIMITS.planText), acceptance: text(record.acceptance, 'acceptance', CAMP_LIMITS.planText), verification: text(record.verification, 'verification', CAMP_LIMITS.planText) };
 }
-/** @param {unknown} value @returns {{planRevision:1,summary:string,tasks:CampPlanItem[]}} */
+/** Revision 2 never infers dependencies from item order.
+ * @param {unknown} value @returns {CampDagPlanItem} */
+export function parseDagPlanItem(value) {
+  const record = object(value, 'DAG item');
+  const { dependsOnKeys, ...fields } = record;
+  const item = parsePlanItem(fields);
+  if (!Array.isArray(dependsOnKeys) || dependsOnKeys.length > CAMP_DAG_LIMITS.parents || dependsOnKeys.some(key => typeof key !== 'string' || !/^[a-z][a-z0-9_-]{0,47}$/.test(key)) || new Set(dependsOnKeys).size !== dependsOnKeys.length || dependsOnKeys.includes(item.key)) throw new CampProtocolError('invalid_plan', 'DAG nodes require zero to two distinct parent keys, excluding themselves');
+  return { ...item, dependsOnKeys: /** @type {string[]} */ ([...dependsOnKeys]) };
+}
+/** @param {unknown} value @returns {CampPlanSubmission} */
 export function parsePlanSubmission(value) {
   const record = object(value, 'Plan'); only(record, ['planRevision', 'summary', 'tasks'], 'Plan');
-  if (record.planRevision !== 1 || !Array.isArray(record.tasks) || !record.tasks.length || record.tasks.length > CAMP_LIMITS.planItems) throw new CampProtocolError('invalid_plan', 'Plan requires revision 1 and one to five ordered items');
-  const tasks = record.tasks.map(parsePlanItem);
+  if (![1, 2].includes(/** @type {number} */ (record.planRevision))) throw new CampProtocolError('invalid_plan', 'Unsupported plan revision');
+  const graph = record.planRevision === 2;
+  if (!Array.isArray(record.tasks) || !record.tasks.length || record.tasks.length > (graph ? CAMP_DAG_LIMITS.nodes : CAMP_LIMITS.planItems)) throw new CampProtocolError('invalid_plan', graph ? 'A DAG requires one to six nodes' : 'A plan requires one to five ordered items');
+  const tasks = record.tasks.map(graph ? parseDagPlanItem : parsePlanItem);
   if (new Set(tasks.map(task => task.key)).size !== tasks.length) throw new CampProtocolError('invalid_plan', 'Plan item keys must be unique');
+  if (graph) {
+    const nodes = /** @type {CampDagPlanItem[]} */ (tasks);
+    const byKey = new Map(nodes.map((task, index) => [task.key, { task, index }]));
+    /** @type {Map<string, Set<string>>} */ const closure = new Map();
+    const visiting = new Set();
+    /** @param {string} key @returns {Set<string>} */
+    const ancestors = key => {
+      if (closure.has(key)) return /** @type {Set<string>} */ (closure.get(key));
+      if (visiting.has(key)) throw new CampProtocolError('invalid_plan', 'DAG dependencies contain a cycle');
+      const entry = byKey.get(key);
+      if (!entry) throw new CampProtocolError('invalid_plan', 'DAG dependency names a missing node');
+      visiting.add(key); const result = new Set();
+      for (const parent of entry.task.dependsOnKeys) { result.add(parent); for (const ancestor of ancestors(parent)) result.add(ancestor); }
+      visiting.delete(key); closure.set(key, result); return result;
+    };
+    for (const node of nodes) ancestors(node.key);
+    for (const node of nodes) {
+      if (node.dependsOnKeys.some(a => node.dependsOnKeys.some(b => a !== b && ancestors(b).has(a)))) throw new CampProtocolError('invalid_plan', 'DAG dependencies contain a redundant ancestor edge');
+      node.dependsOnKeys.sort((a, b) => /** @type {{index:number}} */ (byKey.get(a)).index - /** @type {{index:number}} */ (byKey.get(b)).index);
+    }
+    const parents = new Set(nodes.flatMap(node => node.dependsOnKeys));
+    if (nodes.filter(node => !parents.has(node.key)).length > CAMP_DAG_LIMITS.sinks) throw new CampProtocolError('invalid_plan', 'A DAG supports at most two final nodes; add explicit join nodes');
+    return { planRevision: 2, summary: text(record.summary, 'summary', CAMP_LIMITS.text), tasks: nodes };
+  }
   return { planRevision: 1, summary: text(record.summary, 'summary', CAMP_LIMITS.text), tasks };
 }
 /** @param {unknown} value @returns {CampPlan} */
 export function parsePlan(value) {
   const record = object(value, 'Plan'); only(record, ['revision', 'summary', 'tasks'], 'Plan');
   const result = parsePlanSubmission({ planRevision: record.revision, summary: record.summary, tasks: record.tasks });
-  return { revision: 1, summary: result.summary, tasks: result.tasks };
+  return result.planRevision === 2 ? { revision: 2, summary: result.summary, tasks: result.tasks } : { revision: 1, summary: result.summary, tasks: result.tasks };
 }
 
 /** A bounded self-report, never a remote attestation or a model-key test.
@@ -447,6 +521,8 @@ const ordinaryText = { type: 'string', minLength: 1, maxLength: CAMP_LIMITS.text
 const itemText = { type: 'string', minLength: 1, maxLength: CAMP_LIMITS.planText };
 const roleSchema = { type: 'string', enum: [...CAMP_ROLES] };
 export const CAMP_PLAN_ITEM_SCHEMA = schema({ key: { type: 'string', pattern: '^[a-z][a-z0-9_-]{0,47}$' }, title: { type: 'string', minLength: 1, maxLength: CAMP_LIMITS.planTitle }, description: itemText, acceptance: itemText, verification: itemText }, ['key', 'title', 'description', 'acceptance', 'verification']);
+export const CAMP_DAG_PLAN_ITEM_SCHEMA = schema({ ...CAMP_PLAN_ITEM_SCHEMA.properties, dependsOnKeys: { type: 'array', maxItems: CAMP_DAG_LIMITS.parents, uniqueItems: true, items: { type: 'string', pattern: '^[a-z][a-z0-9_-]{0,47}$' } } }, [...CAMP_PLAN_ITEM_SCHEMA.required, 'dependsOnKeys']);
+export const CAMP_DAG_PLAN_TOOL_SCHEMA = schema({ summary: ordinaryText, tasks: { type: 'array', minItems: 1, maxItems: CAMP_DAG_LIMITS.nodes, items: CAMP_DAG_PLAN_ITEM_SCHEMA } }, ['summary', 'tasks']);
 /** These schemas are model-facing: no worker credentials, model selection or
  * arbitrary role/identity provisioning fields belong here. */
 export const CAMP_TOOL_SCHEMAS = Object.freeze({
@@ -482,13 +558,15 @@ export const CAMP_TOOL_SCHEMAS = Object.freeze({
 /** @typedef {CampReference & {type:string,path?:string,summary?:string,evidence?:string|string[],candidate?:CampReviewTarget,outcome?:'approved'|'changes_requested'|'handoff',branch?:string,rootId?:string,projectId?:string,runId?:string,sandboxId?:string,imageId?:string,baseRef?:string,profile?:string,[key:string]:unknown}} CampArtifact */
 /** @typedef {{status:'completed'|'failed'|'cancelled'|'suspended',summary:string,artifacts?:CampArtifact[],sessionId?:string,error?:string,outcome?:'approved'|'changes_requested'|'handoff',inputCandidate?:CampCandidate,candidate?:CampCandidate,questionId?:string,changeSet?:CampChangeSet,verification?:CampVerificationReport,integration?:CampIntegrationReport}} CampCompletion */
 /** @typedef {{key:string,title:string,description:string,acceptance:string,verification:string}} CampPlanItem */
-/** @typedef {{revision:1,summary:string,tasks:CampPlanItem[]}} CampPlan */
+/** @typedef {CampPlanItem & {dependsOnKeys:string[]}} CampDagPlanItem */
+/** @typedef {{planRevision:1,summary:string,tasks:CampPlanItem[]}|{planRevision:2,summary:string,tasks:CampDagPlanItem[]}} CampPlanSubmission */
+/** @typedef {{revision:1,summary:string,tasks:CampPlanItem[]}|{revision:2,summary:string,tasks:CampDagPlanItem[]}} CampPlan */
 /** @typedef {{summary:string,evidence:string|null,remaining:string[]}} CampFinalSummary */
 /** @typedef {{runs:number,reviewRounds:number,elapsedSeconds:number,itemsTotal:number,itemsApproved:number,questionsAsked:number,questionsAnswered:number,reworks:number,humanAnswers:number,agentAnswers:number,roleAnswers?:number,manualRetries:number}} CampMetrics */
 /** @typedef {{runId:string,outcome:'approved'|'changes_requested',evidence:string|string[],summary:string,candidate:CampReviewTarget|null,createdAt:string}} CampReviewRecord */
 /** @typedef {CampPlanItem & {index:number,status:'pending'|'building'|'reviewing'|'approved'|'needs_attention',reworkCount:number,candidate:CampCandidate|null,reviews:CampReviewRecord[]}} CampWorkItem */
 /** @typedef {{id:string,goalId:string,goalAttempt:number,taskId:string,originRunId:string|null,fromRole:CampRole,toRole:CampRole|null,needsHuman:boolean,status:CampQuestionStatus,content:string,answer:string|null,answerByRole:string|null,canAnswer:boolean,createdAt:string,answeredAt:string|null}} CampQuestion */
-/** @typedef {{schemaVersion:1,roomId:string,goalId:string,goalAttempt?:number,workflow?:CampWorkflow,planMode?:CampPlanMode,status:CampGoalStatus,resultReady:boolean,candidate:CampCandidate|null,summary:string|null,evidence:string|null,remaining:string[],metrics:CampMetrics,verification?:{policy:CampVerificationPolicySnapshot|null,receipt:CampVerificationReceipt|null}|null,integration?:{input:CampIntegrationInput,receipt:CampIntegrationReceipt|null}|null}} CampResultManifest */
+/** @typedef {{schemaVersion:1,roomId:string,goalId:string,goalAttempt?:number,workflow?:CampWorkflow,planMode?:CampPlanMode,status:CampGoalStatus,resultReady:boolean,candidate:CampCandidate|null,summary:string|null,evidence:string|null,remaining:string[],metrics:CampMetrics,verification?:{policy:CampVerificationPolicySnapshot|null,receipt:CampVerificationReceipt|null}|null,integration?:{input:CampIntegrationInput,receipt:CampIntegrationReceipt|null}|CampDagIntegrationEvidence|null}} CampResultManifest */
 /** @typedef {{protocolVersions:number[],workerVersion:string,taskKinds:string[],refKinds:string[],capabilities:string[],harnesses?:CampHarnessIdentity[],executionPool?:CampExecutionPool}} CampWorkerDeclaration */
 /** @typedef {{schemaVersion:1,supportedProtocolVersions:number[],capabilities:string[],taskKinds:string[],refKinds:string[]}} CampServerProtocol */
 /** @typedef {{protocolVersion:number|null,workflow:CampWorkflow,taskKind:CampTaskKind,refKinds:string[],capabilities:string[],harnesses?:CampHarnessIdentity[],executionPoolRequired?:boolean}} CampTaskRequirements */
@@ -501,11 +579,15 @@ export const CAMP_TOOL_SCHEMAS = Object.freeze({
 /** @typedef {{id:string,argv:string[],exitCode:number|null,signal:string|null,timedOut:boolean,oomKilled:boolean,durationMs:number,stdout:string,stderr:string,outputTruncated:boolean}} CampVerificationCheckResult */
 /** @typedef {{candidate:CampCandidate,policyDigest:string,checks:CampVerificationCheckResult[]}} CampVerificationReport */
 /** @typedef {CampVerificationReport & {schemaVersion:1,status:'passed'|'failed',runId:string,operationId:string,verifiedAt:string}} CampVerificationReceipt */
+/** @typedef {'layerfs-three-way-v1'|'layerfs-three-way-v2'} CampIntegrationAlgorithm */
 /** @typedef {{key:string,runId:string,epoch:number,candidate:CampCandidate}} CampIntegrationParent */
-/** @typedef {{schemaVersion:1,algorithm:'layerfs-three-way-v1',policy:'reject-overlap-v1',base:CampCandidate,parents:[CampIntegrationParent,CampIntegrationParent]}} CampIntegrationInput */
+/** @typedef {{schemaVersion:1,algorithm:CampIntegrationAlgorithm,policy:'reject-overlap-v1',base:CampCandidate,parents:[CampIntegrationParent,CampIntegrationParent]}} CampIntegrationInput */
 /** @typedef {{path:string,reason:'overlap'|'delete_modify'|'structural'|'policy_path'|'unsupported'}} CampIntegrationConflict */
-/** @typedef {{schemaVersion:1,inputDigest:string,algorithm:'layerfs-three-way-v1',policy:'reject-overlap-v1',status:'merged'|'conflict'|'rejected',candidate:CampCandidate|null,conflicts:CampIntegrationConflict[],truncated:boolean}} CampIntegrationReport */
+/** @typedef {{schemaVersion:1,inputDigest:string,algorithm:CampIntegrationAlgorithm,policy:'reject-overlap-v1',status:'merged'|'conflict'|'rejected',candidate:CampCandidate|null,conflicts:CampIntegrationConflict[],truncated:boolean}} CampIntegrationReport */
 /** @typedef {CampIntegrationReport & {runId:string,operationId:string,integratedAt:string}} CampIntegrationReceipt */
+/** @typedef {'baseline'|'single_parent'|'same_ref'|'ancestor'|'integration'} CampDagInputResolution */
+/** @typedef {{status:'waiting_nodes'|'waiting_integration'|'ready'|'blocked',candidate:CampCandidate|null,sourceRunId:string|null,operationId:string|null,inputSources:CampIntegrationParent[],inputResolution:CampDagInputResolution|null}} CampDagDelivery */
+/** @typedef {{delivery:CampDagDelivery,operations:{id:string,scope:'goal'|'node_input',planItemKey:string|null,status:CampOperationStatus,integrationInput:CampIntegrationInput|null,inputDigest:string|null,integrationReport:CampIntegrationReceipt|null}[]}} CampDagIntegrationEvidence */
 /** @typedef {'queued'|'running'|'completed'|'failed'|'cancelled'|'blocked'} CampOperationStatus */
 /** @typedef {{type:'file',mode:number,size:number,sha256:string}|{type:'directory',mode:number,size:number}|{type:'symlink',mode:number,size:number,target:string}} CampChangeSide */
 /** @typedef {{path:string,change:'added'|'modified'|'deleted'|'type_changed',before:CampChangeSide|null,after:CampChangeSide|null,binary:boolean,modeChanged:boolean,patch:string|null,patchTruncated:boolean,previewReason:string|null}} CampChangeEntry */

@@ -2,6 +2,13 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CampRuntime } from '../src/index.mjs';
 
+test('each Worker deployment selects one explicit local Docker authority', () => {
+  assert.equal(new CampRuntime({ env: {} }).docker, '/var/run/docker.sock');
+  assert.equal(new CampRuntime({ env: { CAMP_DOCKER_SOCKET: '/private/target/docker.sock' } }).docker, '/private/target/docker.sock');
+  assert.equal(new CampRuntime({ docker: '/explicit.sock', env: { CAMP_DOCKER_SOCKET: '/ignored.sock' } }).docker, '/explicit.sock');
+  for (const value of ['relative.sock', 'tcp://other-host:2375', '/tmp/bad\nsocket']) assert.throws(() => new CampRuntime({ env: { CAMP_DOCKER_SOCKET: value } }), /absolute local Unix socket/);
+});
+
 test('remote Camp API identity is independent from the local model proxy bind address', async () => {
   const runtime = new CampRuntime(), calls = [];
   runtime.dockerCall = async args => { calls.push(args); return { stdout: JSON.stringify({ bridge: { Gateway: '172.18.0.1' } }) }; };

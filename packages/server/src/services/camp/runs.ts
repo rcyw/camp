@@ -42,8 +42,8 @@ async function integrationContext(tx: DatabaseExecutor, room: Room, run: Run) {
   requireOperationRun(run);
   const [operation] = await tx.select().from(campOperations).where(eq(campOperations.id, run.operationId));
   const [goal] = await tx.select().from(campGoals).where(eq(campGoals.id, operation.goalId));
-  if (operation.kind !== "integration" || !operation.integrationInput || !operation.inputDigest || !run.workerProtocol || ![3, 4].includes(run.workerProtocol.version)) throw fail("The integration contract is missing");
-  return { id: run.id, executor: "integration" as const, operationId: operation.id, taskId: null, role: null, agentId: null, taskKind: "integration" as const, roomId: room.id, goalId: goal.id, goalAttempt: operation.goalAttempt, epoch: run.epoch, leaseExpiresAt: run.leaseExpiresAt.toISOString(), workflow: "serial" as const, planMode: goal.planMode, protocolVersion: run.workerProtocol?.version ?? goal.protocolVersion!, workerProtocol: run.workerProtocol, inputCandidate: operation.inputCandidate, goalBaseline: operation.integrationInput.base, baseRef: operation.inputCandidate.refId, integrationInput: operation.integrationInput, inputDigest: operation.inputDigest, project: room.project };
+  if (operation.kind !== "integration" || !operation.integrationInput || !operation.inputDigest || !run.workerProtocol || ![3, 4, 5].includes(run.workerProtocol.version)) throw fail("The integration contract is missing");
+  return { id: run.id, executor: "integration" as const, operationId: operation.id, taskId: null, role: null, agentId: null, taskKind: "integration" as const, roomId: room.id, goalId: goal.id, goalAttempt: operation.goalAttempt, epoch: run.epoch, leaseExpiresAt: run.leaseExpiresAt.toISOString(), workflow: "serial" as const, planMode: goal.planMode, protocolVersion: run.workerProtocol?.version ?? goal.protocolVersion!, workerProtocol: run.workerProtocol, inputCandidate: operation.inputCandidate, goalBaseline: goal.protocolVersion === 5 ? goal.baseCandidate! : operation.integrationInput.base, scope: operation.scope, planItemKey: operation.planItemKey, baseRef: operation.inputCandidate.refId, integrationInput: operation.integrationInput, inputDigest: operation.inputDigest, project: room.project };
 }
 async function verificationContext(tx: DatabaseExecutor, room: Room, run: Run) {
   requireVerificationRun(run);
@@ -156,7 +156,7 @@ async function executionContext(tx: DatabaseExecutor, room: Room, run: Run) {
     `Task: ${task.title}`, task.description,
     "Stay within this role. Report progress and candidate artifacts. The trusted worker owns claim, completion and handoff. Never publish to main automatically.",
     reviewTask ? "Review and test the selected candidate. Before finishing, call camp_review with outcome approved or changes_requested, a summary, and a nonempty evidence string describing the checks. The verdict binds the server-selected candidate. A prose verdict cannot complete this review." : undefined,
-    goal.workflow === "serial" && binding.kind === "plan" ? plan ? `This attempt already has an immutable plan. Do not replace it: ${JSON.stringify(plan)}` : ["same_baseline_pair", "parallel_pair"].includes(goal.planMode) ? "Submit exactly two independent plan items with camp_submit_plan. Both builds start from the same immutable baseline, so neither item may depend on the other item. Then finish." : "Inspect the original goal and submit one to five ordered, independently reviewable items with camp_submit_plan. Each item needs key/title/description/acceptance/verification. Then finish this planning turn." : undefined,
+    goal.workflow === "serial" && binding.kind === "plan" ? plan ? `This attempt already has an immutable plan. Do not replace it: ${JSON.stringify(plan)}` : goal.planMode === "bounded_dag" ? "Submit a bounded DAG using camp_submit_plan revision 2: one to six nodes, every node has dependsOnKeys (zero to two direct parent keys), at most two sinks, no cycles, missing parents or transitively redundant edges. The trusted scheduler resolves approved inputs and merges. Then finish." : ["same_baseline_pair", "parallel_pair"].includes(goal.planMode) ? "Submit exactly two independent plan items with camp_submit_plan. Both builds start from the same immutable baseline, so neither item may depend on the other item. Then finish." : "Inspect the original goal and submit one to five ordered, independently reviewable items with camp_submit_plan. Each item needs key/title/description/acceptance/verification. Then finish this planning turn." : undefined,
     goal.workflow === "serial" && binding.kind !== "build" ? "This task is read-only: inspect and run checks without changing workspace content. The worker will reject a changed content root." : undefined,
     verificationReceipt ? `Independent operator verification receipt (server-owned): ${JSON.stringify(verificationReceipt)}. Use these actual termination results as evidence; model prose cannot replace this gate.` : undefined,
     binding.kind === "summary" ? "Before ending, call camp_finalize with the final delivery summary, evidence, and remaining limitations. The server supplies the reviewed candidate; do not choose a candidate ID." : undefined,
@@ -342,7 +342,7 @@ export async function claimRunDetailed(principal: CampPrincipal, workerId: strin
         continue;
       }
       if (goal.runCount >= goal.budget.maxRuns) { await stopGoal(tx, room, goal, "run_budget_exhausted"); continue; }
-      const parallel = goal.planMode === "parallel_pair";
+      const parallel = ["parallel_pair", "bounded_dag"].includes(goal.planMode);
       const occupiedLane = occupied.find(run => run.workerId === workerId || run.taskId === binding.taskId);
       if (occupiedLane) { waitFor(compatibility, requirements, occupiedLane.status === "running" ? "lane_busy" : "cleanup_pending"); continue; }
       if (goal.workflow === "serial" && (parallel ? occupied.length >= 2 || occupied.some(run => run.executor !== "agent") : occupied.length > 0)) {
@@ -567,7 +567,7 @@ async function completeIntegrationRun(tx: DatabaseExecutor, principal: CampPrinc
   if (successful && (!active || expired || goal.baseHeadRevision !== room.acceptedRevision)) throw fail("The integration's goal, deadline or baseline changed");
   if (successful && (!report || !sameCandidate(reportedInput, operation.inputCandidate))) throw new CampError(409, "integration_receipt_required", "The trusted worker must attest the exact frozen integration input");
   if (report?.status === "merged") {
-    if (!sameCandidate(candidate, report.candidate) || !changeSet || !sameCandidate(changeSet.base, operation.inputCandidate) || !sameCandidate(changeSet.target, report.candidate)) throw new CampError(409, "integration_candidate_mismatch", "The merged candidate and cumulative changes must match the integration report");
+    if (!sameCandidate(candidate, report.candidate) || !changeSet || !sameCandidate(changeSet.base, goal.protocolVersion === 5 ? goal.baseCandidate : operation.inputCandidate) || !sameCandidate(changeSet.target, report.candidate)) throw new CampError(409, "integration_candidate_mismatch", "The merged candidate and cumulative changes must match the integration report");
   } else if (candidate || changeSet) throw new CampError(400, "integration_payload_invalid", "Only a validated merged report can publish a candidate or changes");
   if (!successful && report) throw new CampError(400, "integration_payload_invalid", "Only completed integration executions may record a business result");
   if (input.error === "camp_integration_inspection_required") {
@@ -697,7 +697,7 @@ export async function cancelRun(roomId: string, runId: string, userId: string) {
     if (!run) throw new CampError(404, "run_not_found", "Run not found");
     if (run.status !== "running") throw fail("The run has already ended");
     const [owner] = await tx.select({ goal: campGoals }).from(campGoals).leftJoin(campTasks, eq(campTasks.goalId, campGoals.id)).leftJoin(campOperations, eq(campOperations.goalId, campGoals.id)).where(and(eq(campGoals.roomId, roomId), run.taskId ? eq(campTasks.taskId, run.taskId) : eq(campOperations.id, run.operationId!))).limit(1);
-    if (owner?.goal.planMode === "parallel_pair") await stopGoal(tx, room, owner.goal, "cancelled_by_human", true);
+    if (owner && ["parallel_pair", "bounded_dag"].includes(owner.goal.planMode)) await stopGoal(tx, room, owner.goal, "cancelled_by_human", true);
     const [requested] = await tx.update(campRuns).set({ cancelRequestedAt: sql`now()` }).where(eq(campRuns.id, runId)).returning({ id: campRuns.id, status: campRuns.status, cancelRequestedAt: campRuns.cancelRequestedAt });
     await tx.insert(campEvents).values({ roomId, runId, type: "cancel_requested", content: `A human requested cancellation (${userId}); waiting for worker cleanup` });
     return { room, run: requested };

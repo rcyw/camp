@@ -2,7 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { copyFile, chmod, mkdir, readFile, writeFile, access, realpath } from 'node:fs/promises';
-import { resolve, join } from 'node:path';
+import { resolve, join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stageSource } from './source-snapshot.mjs';
 import { atomicJson, privateDirectory } from './durable-state.mjs';
@@ -43,7 +43,8 @@ export class CampRuntime {
     this.native = resolve(options.native ?? paths?.native ?? join(PACKAGE, '.local/layerfs/layerfs.node'));
     this.daemon = resolve(options.daemon ?? paths?.daemon ?? join(PACKAGE, '.local/layerfs/layerfs-daemon'));
     this.imageId = options.imageId ?? env.CAMP_RUNTIME_IMAGE;
-    this.docker = options.docker ?? '/var/run/docker.sock';
+    this.docker = options.docker ?? env.CAMP_DOCKER_SOCKET ?? '/var/run/docker.sock';
+    if (typeof this.docker !== 'string' || !isAbsolute(this.docker) || /[\u0000-\u001f\u007f]/.test(this.docker)) throw new Error('CAMP_DOCKER_SOCKET must name an absolute local Unix socket');
     this.dshArchive = options.dshArchive ?? env.CAMP_DSH_ARCHIVE ?? paths?.dshArchive ?? join(PACKAGE, '.local/dsh-runtime.tar');
     this.projects = new Map();
     // Defer validation until new execution so a bad replacement policy cannot

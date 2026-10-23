@@ -26,7 +26,7 @@ export function physicalPoolCompatibility(room: Room, workerId: string, declarat
   return compatibility;
 }
 export function poolCompatibility(room: Room, goal: Goal, workerId: string, declaration: CampWorkerDeclaration | null, compatibility: CampWorkerCompatibility): CampWorkerCompatibility {
-  if ((!room.storageId && goal.protocolVersion !== 4) || compatibility.status === "incompatible") return compatibility;
+  if ((!room.storageId && ![4, 5].includes(goal.protocolVersion ?? 0)) || compatibility.status === "incompatible") return compatibility;
   const checked = physicalPoolCompatibility(room, workerId, declaration, compatibility);
   if (checked.status === "incompatible") return checked;
   if (goal.executionPool && serializeExecutionPool(goal.executionPool) !== serializeExecutionPool(declaration!.executionPool!)) return { ...compatibility, status: "incompatible", code: "pool_mismatch" };
@@ -34,7 +34,7 @@ export function poolCompatibility(room: Room, goal: Goal, workerId: string, decl
 }
 /** Called only after all admission checks under the existing Room row lock. */
 export async function pinExecutionPool(tx: DatabaseExecutor, room: Room, goal: Goal, declaration: CampWorkerDeclaration | null) {
-  if (goal.protocolVersion !== 4 || !declaration?.executionPool) return;
+  if (![4, 5].includes(goal.protocolVersion ?? 0) || !declaration?.executionPool) return;
   if (!room.storageId) await tx.update(campRooms).set({ storageId: declaration.executionPool.storageId }).where(eq(campRooms.id, room.id));
   if (!goal.executionPool) await tx.update(campGoals).set({ executionPool: declaration.executionPool }).where(eq(campGoals.id, goal.id));
 }

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { parseIntegrationInput, serializeIntegrationInput, parseIntegrationReport, parseChangeSet, parseCandidate } from '../../camp-protocol/src/index.js';
+import { parseIntegrationInput, serializeIntegrationInput, parseIntegrationReport, parseChangeSet, parseCandidate, CAMP_DAG_INTEGRATION_ALGORITHM } from '../../camp-protocol/src/index.js';
 
 const same = (a, b) => a && b && ['projectId', 'imageId', 'refKind', 'refId', 'rootId'].every(key => a[key] === b[key]);
 
@@ -12,8 +12,11 @@ export function integrationCompletion(record) {
   let changeSet;
   if (integration.status === 'merged') {
     parseCandidate(integration.candidate, { projectId: input.base.projectId, imageId: input.base.imageId });
+    const goalBaseline = input.algorithm === CAMP_DAG_INTEGRATION_ALGORITHM
+      ? parseCandidate(record.integrationGoalBaseline, { projectId: input.base.projectId, imageId: input.base.imageId })
+      : input.base;
     changeSet = parseChangeSet(record.integrationChangeSet);
-    if (!same(changeSet.base, input.base) || !same(changeSet.target, integration.candidate)) throw new Error('Integration changes must describe the exact merged candidate');
+    if (!same(changeSet.base, goalBaseline) || !same(changeSet.target, integration.candidate)) throw new Error('Integration changes must describe the exact Goal baseline and merged candidate');
   } else if (record.integrationChangeSet) throw new Error('An unsuccessful integration cannot publish candidate changes');
   return {
     workerId: record.workerId, epoch: record.epoch, status: 'completed',

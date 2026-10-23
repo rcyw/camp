@@ -1,19 +1,20 @@
-import { parsePlanSubmission } from "../../../../camp-protocol/src/index.js";
+import { parsePlan, parsePlanSubmission, type CampPlanSubmission } from "../../../../camp-protocol/src/index.js";
 import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { getDb, type DatabaseExecutor } from "../../db/index";
 import { campEvents, campFinalizations, campGoals, campPlans, campTasks } from "../../db/schema";
+import { initializeDagNodes } from "./dag";
 import { fencedRun, requireAgentRun } from "./runs";
 import { candidateIdentity, sameCandidate } from "./candidates";
 import { assertGoalDeadline } from "./goals";
-import { CampError, type CampFinalSummary, type CampPlan, type CampPlanItem, type CampPrincipal } from "./types";
+import { CampError, type CampFinalSummary, type CampPlan, type CampPrincipal } from "./types";
 
 export type CampPluginInput = { epoch: number; workerId?: string; runId?: string };
 
 export const bodyHash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 export async function currentPlan(tx: DatabaseExecutor, goalId: string, attempt: number): Promise<CampPlan | null> {
   const [plan] = await tx.select().from(campPlans).where(and(eq(campPlans.goalId, goalId), eq(campPlans.goalAttempt, attempt)));
-  return plan ? { revision: 1, summary: plan.summary, tasks: plan.items } : null;
+  return plan ? parsePlan({ revision: plan.revision, summary: plan.summary, tasks: plan.items }) : null;
 }
 export async function currentRunScope(tx: DatabaseExecutor, principal: CampPrincipal, runId: string, epoch: number, identity?: CampPluginInput) {
   if (identity?.runId !== undefined && identity.runId !== runId) throw new CampError(400, "run_identity_mismatch", "The request run identifier does not match the URL");
@@ -27,22 +28,21 @@ export async function currentRunScope(tx: DatabaseExecutor, principal: CampPrinc
   if (goal.baseHeadRevision !== room.acceptedRevision) throw new CampError(409, "stale_baseline", "The Room accepted baseline changed");
   return { room, run, binding, goal };
 }
-function planBody(input: { planRevision: 1; summary: string; tasks: CampPlanItem[] }): CampPlan {
-  const parsed = parsePlanSubmission({ planRevision: input.planRevision, summary: input.summary, tasks: input.tasks });
-  return { revision: parsed.planRevision, summary: parsed.summary, tasks: parsed.tasks };
-}
-export async function submitPlan(principal: CampPrincipal, runId: string, input: CampPluginInput & { planRevision: 1; summary: string; tasks: CampPlanItem[] }) {
+export async function submitPlan(principal: CampPrincipal, runId: string, input: CampPluginInput & { planRevision: 1 | 2; summary: string; tasks: unknown[] }) {
   return getDb().transaction(async tx => {
     const { room, run, binding, goal } = await currentRunScope(tx, principal, runId, input.epoch, input);
-    if (binding.kind !== "plan" || run.role !== "planner") throw new CampError(403, "plan_task_required", "Only the current plan task can submit an ordered plan");
-    const plan = planBody(input), hash = bodyHash(plan);
+    if (binding.kind !== "plan" || run.role !== "planner") throw new CampError(403, "plan_task_required", "Only the current plan task can submit a plan");
+    const parsed: CampPlanSubmission = parsePlanSubmission({ planRevision: input.planRevision, summary: input.summary, tasks: input.tasks });
+    if ((goal.planMode === "bounded_dag") !== (parsed.planRevision === 2)) throw new CampError(400, "plan_revision_mismatch", "Graph mode requires revision 2; previous modes retain revision 1");
+    const plan = parsePlan({ revision: parsed.planRevision, summary: parsed.summary, tasks: parsed.tasks }), hash = bodyHash(plan);
     if (["same_baseline_pair", "parallel_pair"].includes(goal.planMode) && plan.tasks.length !== 2) throw new CampError(400, "pair_plan_required", "A same-baseline pair requires exactly two independent plan items");
     const [existing] = await tx.select().from(campPlans).where(and(eq(campPlans.goalId, goal.id), eq(campPlans.goalAttempt, goal.attempt)));
     if (existing) {
       if (existing.bodyHash !== hash) throw new CampError(409, "plan_conflict", "This attempt already has a different immutable plan");
       return { plan, replayed: true, room };
     }
-    await tx.insert(campPlans).values({ roomId: room.id, goalId: goal.id, goalAttempt: goal.attempt, taskId: binding.taskId, submittedRunId: run.id, bodyHash: hash, summary: plan.summary, items: plan.tasks });
+    const [saved] = await tx.insert(campPlans).values({ roomId: room.id, goalId: goal.id, goalAttempt: goal.attempt, taskId: binding.taskId, submittedRunId: run.id, revision: plan.revision, bodyHash: hash, summary: plan.summary, items: plan.tasks }).returning();
+    if (plan.revision === 2) await initializeDagNodes(tx, saved.id, goal, plan.tasks);
     await tx.insert(campEvents).values({ roomId: room.id, goalId: goal.id, runId, type: "plan_submitted", content: plan.summary });
     return { plan, replayed: false, room };
   });

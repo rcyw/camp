@@ -409,7 +409,7 @@ test("real PostgreSQL room claims have one winner and expired epochs cannot comp
     const pairSettlements = await Promise.all([completeRun(pairPrincipal, integrator.id, "pair-worker", integrator.epoch, integrationCompletion), completeRun(pairPrincipal, integrator.id, "pair-worker", integrator.epoch, integrationCompletion)]);
     assert.equal(pairSettlements.filter(result => result.replayed).length, 1);
     const pairOperations = await db.select().from(schema.campOperations).where(eq(schema.campOperations.goalId, pairGoal.goalId)); assert.equal(pairOperations.filter(operation => operation.kind === "integration").length, 1); assert.equal(pairOperations.filter(operation => operation.kind === "verification").length, 1);
-    await assert.rejects(db.insert(schema.campOperations).values({ ...pairOperations.find(operation => operation.kind === "integration")!, id: randomUUID() }), (error: unknown) => (error as { cause?: { constraint?: string } }).cause?.constraint === "camp_operations_integration_attempt");
+    await assert.rejects(db.insert(schema.campOperations).values({ ...pairOperations.find(operation => operation.kind === "integration")!, id: randomUUID() }), (error: unknown) => (error as { cause?: { constraint?: string } }).cause?.constraint === "camp_operations_integration_scope");
 
     const [freshPair] = await db.select().from(schema.campGoals).where(eq(schema.campGoals.id, pairGoal.goalId)); assert.equal(freshPair.integrationInspectionRequired, false);
     await assert.rejects(db.update(schema.campGoals).set({ integrationInspectionRequired: true }).where(eq(schema.campGoals.id, goal3)), (error: unknown) => (error as { cause?: { constraint?: string } }).cause?.constraint === "camp_goals_integration_inspection_pair");

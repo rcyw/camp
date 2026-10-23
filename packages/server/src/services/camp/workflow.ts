@@ -1,3 +1,4 @@
+import { advanceDag } from "./dag";
 import { and, eq, ne, sql } from "drizzle-orm";
 import type { DatabaseExecutor } from "../../db/index";
 import { campFinalizations, campGoals, campPlans, campRooms, campRuns, campTasks, campOperations } from "../../db/schema";
@@ -56,6 +57,7 @@ export async function requireSerialCompletion(tx: DatabaseExecutor, goal: Goal, 
  * Model artifacts never select a workspace or advance the Room accepted head. */
 export async function advanceSerial(tx: DatabaseExecutor, room: Room, previousGoal: Goal, binding: Binding, run: Run, inputCandidate: CampCandidate, candidate: CampCandidate, review: CampReview | null) {
   const [goal] = await tx.select().from(campGoals).where(eq(campGoals.id, previousGoal.id));
+  if (goal.planMode === "bounded_dag" && await advanceDag(tx, room, goal, binding, run, inputCandidate, candidate, review)) return;
   const [plan] = await tx.select().from(campPlans).where(and(eq(campPlans.goalId, goal.id), eq(campPlans.goalAttempt, goal.attempt)));
   if (!plan) throw new CampError(409, "plan_required", "The ordered plan is missing");
   const item = binding.planItemKey ? plan.items.find(value => value.key === binding.planItemKey) : undefined;

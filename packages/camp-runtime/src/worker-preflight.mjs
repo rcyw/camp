@@ -1,6 +1,6 @@
 import { CAMP_PREFLIGHT_CHECK_IDS, CAMP_WORKER_VERSION, parsePreflightReport, parseServerProtocol } from '../../camp-protocol/src/index.js';
 import { resourcePolicy, storageCapacity } from './resource-policy.mjs';
-import { checkedServerCapabilities, selectWorkerDeclaration } from './worker-protocol.mjs';
+import { checkedServerCapabilities, selectWorkerDeclaration, readPluginDeclaration } from './worker-protocol.mjs';
 import { hostname } from 'node:os';
 
 const check = (id, status, code) => ({ id, status, code });
@@ -52,7 +52,8 @@ export async function inspectWorker({ runtime, env = process.env, request, repor
     setup ??= await requestApi('/setup');
     if (!setup || typeof setup.roomId !== 'string' || !/^[a-f0-9]{64}$/.test(setup.projectDigest ?? '') || !setup.project || typeof setup.project.name !== 'string') throw Object.assign(new Error('Invalid setup response'), { code: 'camp_setup_invalid', status: 409 });
     const protocol = parseServerProtocol(await requestApi('/protocol'));
-    const { protocol: declaration, version } = selectWorkerDeclaration(protocol, { hasModel: mode === 'agent', executionPool });
+    const plugin = mode === 'agent' ? await readPluginDeclaration(env.CAMP_DSH_PLUGIN) : null;
+    const { protocol: declaration, version } = selectWorkerDeclaration(protocol, { hasModel: mode === 'agent', executionPool, plugin });
     protocolVersion = version;
     checkedServerCapabilities(protocol, declaration);
     apiAvailable = true; facts.set('api', check('api', 'passed', 'authenticated'));

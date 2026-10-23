@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { chromium } from 'playwright';
 import { candidateIdentity, selectCapturedDelivery } from './capture-delivery.mjs';
+import { captureDagRoom } from './capture-dag.mjs';
 
 const args = process.argv.slice(2), options = new Map(), knownCases = ['complete', 'conflict', 'uncertain', 'uncertain_cancel', 'cancel', 'crash'];
 for (let index = 0; index < args.length; index++) {
@@ -52,7 +53,16 @@ try {
     assert.ok(knownCases.includes(record.kind), 'Receipt cases require a known capture kind');
     assert.match(record.roomId ?? '', /^[a-f0-9-]{36}$/i); assert.match(record.goalId ?? '', /^[a-f0-9-]{36}$/i);
     const snapshot = await readCamp('/rooms/' + record.roomId), goal = snapshot.goals.find(value => value.id === record.goalId);
-    assert.ok(goal, 'Goal from the receipt must remain readable'); assert.ok(['same_baseline_pair', 'parallel_pair'].includes(goal.planMode));
+    assert.ok(goal, 'Goal from the receipt must remain readable'); assert.ok(['same_baseline_pair', 'parallel_pair', 'bounded_dag'].includes(goal.planMode));
+    if (goal.planMode === 'bounded_dag') {
+      const url = record.webUrl ?? `${web}/s/${seed.server.slug}/channel/${record.channelId ?? snapshot.room.channelId}?tab=camp`;
+      assert.equal(new URL(url).origin, trustedOrigin, 'Set CAMP_WEB_URL explicitly when selecting another trusted UI origin');
+      await page.goto(url, { waitUntil: 'domcontentloaded' });
+      const panel = page.getByTestId('camp-room-panel'); await panel.waitFor({ state: 'visible', timeout: 45000 });
+      const card = panel.getByTestId('camp-goal-' + goal.id);
+      captures.push({ ...await captureDagRoom({ page, panel, card, snapshot, goal, record, folder, readCamp }), url });
+      continue;
+    }
     if (record.kind === 'uncertain_cancel') {
       assert.equal(goal.status, 'cancelled'); assert.equal(goal.reason, 'cancelled_by_human');
       assert.equal(goal.integrationInspectionRequired, true); assert.equal(goal.canRetry, false);

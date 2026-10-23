@@ -7,6 +7,7 @@ import type {
   CampChangeSet, CampOperationStatus, CampVerificationPolicy, CampVerificationPolicySnapshot, CampVerificationReceipt,
   CampPreflightReport, CampPlanMode, CampIntegrationInput, CampIntegrationReceipt, CampExecutionPool,
   CampStoragePlan, CampStorageBackupReceipt, CampStorageRestoreReceipt,
+  CampIntegrationParent,
 } from "../../../../camp-protocol/src/index.js";
 
 // Keep component imports stable while the wire contract has one definition.
@@ -22,12 +23,18 @@ export type {
   CampPreflightReport, CampPreflightCheck, CampPreflightCheckId,
   CampPlanMode, CampIntegrationInput, CampIntegrationReport, CampIntegrationReceipt, CampExecutionPool,
   CampStoragePlan, CampStorageBackupReceipt, CampStorageRestoreReceipt,
+  CampIntegrationParent,
 } from "../../../../camp-protocol/src/index.js";
 export type CampStatus = CampRunStatus;
 export type CampResult = CampResultManifest;
 export type CampOutcome = NonNullable<CampArtifact["outcome"]>;
 export type CampWorkItem = ProtocolWorkItem & {
-  scheduling?: { state: "ready" | "running" | "waiting_capacity" | "waiting_review" | "waiting_question" | "approved" | "blocked" | "pending"; reason: string | null };
+  dependsOnKeys?: string[];
+  inputSources?: CampIntegrationParent[];
+  inputCandidate?: CampCandidate | null;
+  inputResolution?: "baseline" | "single_parent" | "same_ref" | "ancestor" | "integration" | null;
+  scopedIntegrationOperationId?: string | null;
+  scheduling?: { state: "ready" | "running" | "waiting_capacity" | "waiting_review" | "waiting_question" | "waiting_dependencies" | "waiting_integration" | "approved" | "blocked" | "pending"; reason: string | null; blockedByKeys?: string[] };
 };
 
 // Public room projections remain browser DTOs, composed from shared domain types.
@@ -55,6 +62,7 @@ export interface CampGoal {
   integration?: CampGoalIntegration;
   integrationInspectionRequired?: boolean;
   executionPool?: CampExecutionPool | null;
+  graph?: { schemaVersion: 1; sinkKeys: string[]; delivery: { status: "waiting_nodes" | "waiting_integration" | "ready" | "blocked"; candidate: CampCandidate | null; sourceRunId: string | null; operationId: string | null } } | null;
   resultReady?: boolean;
   baseHeadRevision?: number;
   fromGoalId?: string | null;
@@ -144,6 +152,8 @@ export interface CampIntegrationOperation {
   goalId: string;
   goalAttempt: number;
   kind: "integration";
+  scope?: "goal" | "node_input";
+  planItemKey?: string | null;
   status: CampOperationStatus;
   attempt: number;
   infrastructureFailures: number;
@@ -165,6 +175,7 @@ export interface CampVersion {
   candidate: CampCandidate;
   taskKind: null | "build" | "integration";
   operationId?: string | null;
+  scope?: "goal" | "node_input" | null;
   planItemKey: string | null;
   goalAttempt: number;
   createdAt: string;

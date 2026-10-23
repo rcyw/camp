@@ -187,7 +187,7 @@ export async function roomSnapshot(roomId: string, userId?: string) {
   const goals = await goalSnapshots(roomId, role === "owner" || role === "admin", canSubmit, operations);
   const storage = await storageSnapshot(roomId, role === "owner" || role === "admin");
   const roomBusy = storage.maintenance || (await roomOccupancy(db, roomId)).some(run => run.status !== "running") || goals.some(goal => ["queued", "running", "waiting_question", "cancelling"].includes(goal.status) || goal.activeRuns > 0);
-  return { storage, supportedPlanModes: ["sequential", "same_baseline_pair", "parallel_pair"], setup: await roomSetup(room), operations, canManage: role === "owner" || role === "admin", workers: await workerSnapshots(roomId), room: { ...room, acceptedHead: { revision: room.acceptedRevision, goalId: room.acceptedGoalId, candidate: room.acceptedCandidate } }, goals, canSubmit, roomBusy, defaultBudget: { serial: DEFAULT_SERIAL_CAMP_BUDGET, legacy: DEFAULT_CAMP_BUDGET }, questions: goals.flatMap(goal => goal.questions), tasks: ordered.map(binding => ({ ...byId.get(binding.taskId), ...binding, id: binding.taskId, executionStatus: binding.status, taskStatus: byId.get(binding.taskId)?.status })), runs: publicRuns, events: events.reverse() };
+  return { storage, supportedPlanModes: ["sequential", "same_baseline_pair", "parallel_pair", "bounded_dag"], setup: await roomSetup(room), operations, canManage: role === "owner" || role === "admin", workers: await workerSnapshots(roomId), room: { ...room, acceptedHead: { revision: room.acceptedRevision, goalId: room.acceptedGoalId, candidate: room.acceptedCandidate } }, goals, canSubmit, roomBusy, defaultBudget: { serial: DEFAULT_SERIAL_CAMP_BUDGET, legacy: DEFAULT_CAMP_BUDGET }, questions: goals.flatMap(goal => goal.questions), tasks: ordered.map(binding => ({ ...byId.get(binding.taskId), ...binding, id: binding.taskId, executionStatus: binding.status, taskStatus: byId.get(binding.taskId)?.status })), runs: publicRuns, events: events.reverse() };
 }
 
 export async function mintWorkerToken(roomId: string, userId: string) {
@@ -205,7 +205,7 @@ export async function revokeWorkerToken(roomId: string, tokenId: string, userId:
   });
 }
 
-export async function createPipeline(roomId: string, userId: string, input: { title: string; description?: string; role?: CampRole; dependsOn?: string[]; budget?: Partial<CampBudget>; workflow?: CampWorkflow; fromGoalId?: string; planMode?: "sequential" | "same_baseline_pair" | "parallel_pair" }) {
+export async function createPipeline(roomId: string, userId: string, input: { title: string; description?: string; role?: CampRole; dependsOn?: string[]; budget?: Partial<CampBudget>; workflow?: CampWorkflow; fromGoalId?: string; planMode?: "sequential" | "same_baseline_pair" | "parallel_pair" | "bounded_dag" }) {
   const [scope] = await getDb().select({ serverId: campRooms.serverId }).from(campRooms).where(eq(campRooms.id, roomId));
   if (!scope) throw new CampError(404, "room_not_found", "Room not found");
   return getDb().transaction(async tx => {
@@ -215,7 +215,7 @@ export async function createPipeline(roomId: string, userId: string, input: { ti
     await assertStorageWritable(tx, room.id);
     const selected = input.role ? [input.role] : [...CAMP_ROLES];
     const workflow = input.role ? "legacy" : input.workflow ?? "serial";
-    if (["same_baseline_pair", "parallel_pair"].includes(input.planMode ?? "") && workflow !== "serial") throw new CampError(400, "serial_workflow_required", "A same-baseline pair requires the serial workflow");
+    if (["same_baseline_pair", "parallel_pair", "bounded_dag"].includes(input.planMode ?? "") && workflow !== "serial") throw new CampError(400, "serial_workflow_required", "A same-baseline pair requires the serial workflow");
     if (workflow === "serial" && CAMP_PROTOCOL_VERSION >= 2 && !room.verificationPolicy) throw new CampError(409, "verification_policy_required", "Configure an operator verification policy before submitting a new serial goal");
     if (input.role && input.workflow === "serial") throw new CampError(400, "serial_role_not_supported", "A serial goal uses the planner, builder and reviewer roles automatically");
     await assertRoomAdmission(tx, room, workflow);
@@ -229,7 +229,7 @@ export async function createPipeline(roomId: string, userId: string, input: { ti
       const found = await tx.select().from(campTasks).where(and(eq(campTasks.roomId, roomId), inArray(campTasks.taskId, dependencies)));
       if (found.length !== new Set(dependencies).size) throw new CampError(400, "invalid_dependencies", "Dependencies must belong to this room");
     }
-    const [goal] = await tx.insert(campGoals).values({ protocolVersion: workflow === "serial" ? input.planMode === "parallel_pair" ? 4 : input.planMode === "same_baseline_pair" ? 3 : 2 : null, planMode: input.planMode ?? "sequential", verificationPolicy: workflow === "serial" ? room.verificationPolicy : null, roomId, title: input.title, description: input.description, roles: selected, workflow, baseHeadRevision: room.acceptedRevision, fromGoalId: input.fromGoalId ?? room.acceptedGoalId, baseCandidate: workflow === "serial" ? room.acceptedCandidate : null, currentCandidate: workflow === "serial" ? room.acceptedCandidate : null, initialDependsOn: dependencies, budget: normalizeBudget(input.budget, workflow), createdByUserId: userId }).returning();
+    const [goal] = await tx.insert(campGoals).values({ protocolVersion: workflow === "serial" ? input.planMode === "bounded_dag" ? 5 : input.planMode === "parallel_pair" ? 4 : input.planMode === "same_baseline_pair" ? 3 : 2 : null, planMode: input.planMode ?? "sequential", verificationPolicy: workflow === "serial" ? room.verificationPolicy : null, roomId, title: input.title, description: input.description, roles: selected, workflow, baseHeadRevision: room.acceptedRevision, fromGoalId: input.fromGoalId ?? room.acceptedGoalId, baseCandidate: workflow === "serial" ? room.acceptedCandidate : null, currentCandidate: workflow === "serial" ? room.acceptedCandidate : null, initialDependsOn: dependencies, budget: normalizeBudget(input.planMode === "bounded_dag" ? { maxRuns: 40, maxReviewRounds: 12, maxDurationSeconds: 3600, ...input.budget } : input.budget, workflow), createdByUserId: userId }).returning();
     const result = await createAttemptTasks(tx, room, goal, "user", userId, dependencies);
     await tx.insert(campEvents).values({ roomId, goalId: goal.id, type: "goal_created", content: input.title });
     return { ...result, roomId, goalId: goal.id };

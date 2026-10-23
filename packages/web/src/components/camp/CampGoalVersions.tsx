@@ -62,7 +62,7 @@ function VersionHistory({ goal, selectedId, onSelect }: { goal: CampGoal; select
   const newest = [...versions].reverse(), currentCandidate = goal.finalCandidate ?? goal.currentCandidate;
   const selected = versions.find(version => version.id === selectedId) ?? newest.find(version => version.kind !== "baseline" && currentCandidate && sameDisplayedCandidate(version.candidate, currentCandidate)) ?? newest[0]!;
   return <>
-    <label className="flex min-w-0 flex-col gap-2 text-sm">{t({ id: "camp.versions.select" })}<select value={selected.id} onChange={onSelect} className="max-w-full rounded border border-border-default bg-layer-canvas p-2 text-sm" data-testid="camp-version-select">{versions.map(version => <option key={version.id} value={version.id}>{t({ id: version.kind === "baseline" ? "camp.versions.baselineOption" : version.kind === "integration" ? "camp.integration.versionOption" : "camp.versions.runOption" }, { attempt: version.goalAttempt })}{version.planItemKey ? ` · ${version.planItemKey}` : ""} · {version.candidate.refId.slice(0, 16)}</option>)}</select></label>
+    <label className="flex min-w-0 flex-col gap-2 text-sm">{t({ id: "camp.versions.select" })}<select value={selected.id} onChange={onSelect} className="max-w-full rounded border border-border-default bg-layer-canvas p-2 text-sm" data-testid="camp-version-select">{versions.map(version => <option key={version.id} value={version.id}>{t({ id: version.kind === "baseline" ? "camp.versions.baselineOption" : version.kind === "integration" ? (version.scope === "node_input" ? "camp.graph.nodeIntegrationVersion" : "camp.integration.versionOption") : "camp.versions.runOption" }, { attempt: version.goalAttempt })}{version.planItemKey ? ` · ${version.planItemKey}` : ""} · {version.candidate.refId.slice(0, 16)}</option>)}</select></label>
     <p className="text-xs"><CampCandidateReference candidate={selected.candidate} /></p>
     <p className="break-all font-mono text-xs text-foreground-hint">{selected.candidate.rootId}</p>
     {selected.kind === "baseline" ? <p className="text-sm text-foreground-hint">{t({ id: "camp.versions.baselineHelp" })}</p> : <VersionInspection key={selected.id} goal={goal} version={selected} />}
@@ -76,8 +76,8 @@ export default function CampGoalVersions({ goal }: { goal: CampGoal }) {
   const select = useCallback((event: ChangeEvent<HTMLSelectElement>) => setSelectedId(event.target.value), []);
   const operationRevision = goal.verification?.operations.map(operation => `${operation.id}:${operation.status}:${operation.latestRunId}`).join("|");
   const integrationRevision = goal.integration?.operations.map(operation => `${operation.id}:${operation.status}:${operation.latestRunId}:${operation.integrationReport?.status}`).join("|");
-  // Parallel items publish independently while the global candidate remains
-  // the shared baseline. Their immutable milestones also refresh the list.
+  // Independent items publish before the goal's delivery candidate changes.
+  // Their immutable milestones also refresh the list.
   const itemRevision = JSON.stringify(goal.items?.map(item => [item.key, item.status, item.reworkCount, item.candidate ? candidateIdentity(item.candidate) : null, item.reviews.at(-1)?.runId]));
   const historyKey = `${goal.attempt}:${goal.status}:${(goal.finalCandidate ?? goal.currentCandidate)?.refId}:${operationRevision}:${integrationRevision}:${itemRevision}:${revision}`;
   return (

@@ -4,9 +4,9 @@ This package is the trusted worker and LayerFS adapter for Camp rooms. It runs o
 
 The worker currently launches from the Camp repository root on one local storage host. It shares the daemon package's ACP client rather than implementing another agent engine.
 
-## Bounded two-lane pool (0.6.0)
+## Bounded two-lane pool
 
-For a `parallel_pair` goal, stop the serial worker and start one pool manager
+For a `parallel_pair` or `bounded_dag` goal, stop the serial worker and start one pool manager
 on the same Linux host and with the same `CAMP_RUNTIME_HOME`, Room credential,
 image, toolchain bundle and source configuration:
 
@@ -20,7 +20,7 @@ Each has a separate stable WorkerID, journal, Runtime instance, branch and
 sandbox. Planner, builder and reviewer remain logical Room roles; the pool is
 not another role scheduler. The server chooses work and freezes the pool's
 identity and resource declaration. Standalone workers advertise protocols
-1–3; only this manager advertises protocol 4 and `bounded-pair.v1`. An older
+1–3; only this manager advertises protocols 4–5 and host pool capabilities. An older
 server cannot silently turn a pool request into serial parallel work.
 
 `execution-pool.json` is private, atomically persisted and binds the original
@@ -39,6 +39,40 @@ contract; stop the manager before running them.
 The lock alone does not prove physical cleanup after SIGKILL. A standalone
 worker also refuses new claims while any managed attempt container remains;
 it leaves foreign resources for their original manager to recover.
+
+Protocol 5 adds the explicit `bounded_dag` mode to this same two-lane pool;
+it does not increase the reservation or create another scheduler. Standalone
+workers still offer versions 1–3. A pool can negotiate version 4 with an older
+server without falsely advertising DAG or revision-2 plan capabilities. A
+version-5 model profile must actually support `structured-plan.v2`; keyless
+system-operation workers offer `bounded-dag.v1` without claiming model tools.
+
+The revision-2 plan supports up to six nodes, two direct parents per node and
+two final sinks. The control server freezes eligibility and exact producer
+lineage. Zero-parent nodes start from the goal baseline; single-parent nodes
+receive that approved candidate. Redundant identical/ancestor candidate inputs
+can be passed through only by the server's explicit recorded selection. Equal
+file roots never imply equal candidate identity. Other joins use the frozen
+binary integration input and `layerfs-three-way-v2`.
+
+The v2 adapter independently walks actual Commit first and second parents,
+bounded to 4,096 total history nodes including the Layer boundary. Reading a
+secondary Commit requires a deterministic private inspection branch because
+the pinned SDK lists history only by branch name. Every such fork is recorded
+in the attempt's durable intent before mutation. A common base cuts off older
+history unless another shared route requires reading it to distinguish an old
+ancestor from an ambiguous criss-cross. Multiple Layer domains require a
+publication-ancestry API and are explicitly unsupported; ordinary Camp Stores
+do not publish additional Layers. A wrong, ambiguous, incomplete or oversized
+ancestry is rejected before native merge. Native `mergeBase` must then equal
+the proven unique maximal common ancestor, and the complete expected file tree
+must still match. Protocols 3/4 retain the conservative v1 integration path.
+
+The bounded ancestry proof is retained with the native result and complete
+tree-validation digest. A missing or mismatched proof cannot recover a v2
+success. Lost inspection-fork replies follow the existing inspection latch;
+recovery never retries those mutations under another name. Exact completion
+outboxes retain their original payload and algorithm through upgrades.
 
 Before either lane can allocate new work, the manager restores the original
 base Worker journal and both lane journals. Pending intents use
@@ -231,16 +265,16 @@ The host starts a per-run streaming model proxy on the run container's local Doc
 
 ## Protocol and capability negotiation
 
-Worker `0.6.0` supports Camp protocols `1`–`4`. Only supervised pool lanes offer protocol 4; standalone Workers offer versions 1–3. Protocol 3 adds roleless trusted integration for an explicit same-baseline pair; default sequential goals retain protocol 2. See the [trusted integration guide](../../docs/mvp/trusted-integration.md) and [bounded pair contract](../../docs/mvp/bounded-pair-execution.md). Protocol 2 adds candidate diffs and roleless trusted verification to the six agent task kinds. Before allocating a claim the worker reads `/api/camp/worker/protocol`, selects a supported version and declares its actual task/reference/capability and installed harness support. A protocol 1 server receives the old six-kind/seven-capability declaration without v2 harness fields. A missing discovery endpoint, unknown version or missing capability for an offered task stops new allocation with a diagnostic. A specialized worker leaves known task kinds it does not offer for another worker and remains idle; with `CAMP_WORKER_ONCE=1` it exits normally. Missing harnesses or capabilities for its own task kind still require an operator correction. Every empty claim clears its unused intent.
+Worker `0.7.0` supports Camp protocols `1`–`5`. Protocol 5 adds [bounded dependency graphs](../../docs/mvp/bounded-dag.md); only supervised pool lanes offer protocols 4–5; standalone Workers offer versions 1–3. Protocol 3 adds roleless trusted integration for an explicit same-baseline pair; default sequential goals retain protocol 2. See the [trusted integration guide](../../docs/mvp/trusted-integration.md) and [bounded pair contract](../../docs/mvp/bounded-pair-execution.md). Protocol 2 adds candidate diffs and roleless trusted verification to the six agent task kinds. Before allocating a claim the worker reads `/api/camp/worker/protocol`, selects a supported version and declares its actual task/reference/capability and installed harness support. A protocol 1 server receives the old six-kind/seven-capability declaration without v2 harness fields. A missing discovery endpoint, unknown version or missing capability for an offered task stops new allocation with a diagnostic. A specialized worker leaves known task kinds it does not offer for another worker and remains idle; with `CAMP_WORKER_ONCE=1` it exits normally. Missing harnesses or capabilities for its own task kind still require an operator correction. Every empty claim clears its unused intent.
 
-When offering agent work, the actual `CAMP_DSH_PLUGIN` directory must contain a valid static `protocol.json` declaration. Preflight only reads that bounded JSON file, without executing plugin JavaScript on the host. Verification-only workers skip this agent check. The maintained declaration is generated from `packages/camp-protocol`:
+When offering agent work, the actual `CAMP_DSH_PLUGIN` directory must contain a valid static `protocol.json` declaration. Preflight only reads that bounded JSON file, without executing plugin JavaScript on the host. Offered versions must satisfy every model task's plugin requirements. A pinned 0.6 plugin therefore keeps offering versions 1–4 against a newer server and cannot claim a DAG; missing fundamental agent capabilities fail closed. Verification-only workers skip this agent check and can offer newer system protocols independently. The maintained declaration is generated from `packages/camp-protocol`:
 
 ```sh
 node packages/dsh-plugin/scripts/protocol-descriptor.mjs
 node packages/dsh-plugin/scripts/protocol-descriptor.mjs --check
 ```
 
-The shared package supplies task/reference names, plan/candidate/report validation and all twelve model-facing tool schemas. Runtime installation and the baked-image recipe copy both the plugin and the dependency-free protocol source, to `/opt/camp-dsh-plugin` and `/opt/camp-protocol`. Their relative imports work without a host workspace symlink or package installation in the agent. The worker injects the run's selected `CAMP_PROTOCOL_VERSION` (`1`–`4`) with the run credential; plugin tools reject a missing or unsupported run protocol.
+The shared package supplies task/reference names, plan/candidate/report validation and all twelve model-facing tool schemas. Runtime installation and the baked-image recipe copy both the plugin and the dependency-free protocol source, to `/opt/camp-dsh-plugin` and `/opt/camp-protocol`. Their relative imports work without a host workspace symlink or package installation in the agent. The worker injects the run's selected `CAMP_PROTOCOL_VERSION` (`1`–`5`) with the run credential; plugin tools reject a missing or unsupported run protocol.
 
 Each new run freezes its selected version, original offered declaration and exact task requirements in `workerProtocol`. The worker checks that snapshot against its explicit input and current capabilities before launching DSH. An old unversioned or unknown run can be retained and recovered, but is not interpreted as a new supported execution. Capability declarations detect old packages and deployment drift; they are self-reported compatibility data, not attestation or authority to bypass server permissions.
 
@@ -499,3 +533,5 @@ Real-provider, browser and cancellation checks are documented in the [MVP guide]
 Per-project/run metadata, candidates and session archives remain under the runtime home. The journal supports process-crash recovery; LayerFS still uses **Disposable** mode, so these checks do not establish filesystem durability across host power loss or disk failure. An uncertain native LayerFS operation is retained with `requiresInspection`; the worker stops rather than blindly retrying it. Preserve the journal and original image when investigating it. Do not globally prune Docker, delete an outbox, or reset the existing Camp database to recover one attempt.
 
 Offline `worker-ops.mjs reap` defaults to a read-only report; explicit `--apply` locks the worker identity and cleans only journal-owned attempts without API access, preserving exact outboxes. See the [single-host operations guide](../../docs/mvp/single-host-worker.md) for setup, resource bounds and recovery. DSH process/session restoration, an unattended offline reaper, storage retention/garbage collection, disk quotas, egress policy and hardened multi-tenant isolation remain deployment work. A committed filesystem cannot undo already-performed external effects. A crash before a complete result is staged can still require another bounded agent attempt; the worker does not invent the missing result.
+
+Private native backup upload/download, resumable transfer and single-authority Worker handoff are documented in the [private transport guide](../../docs/mvp/private-artifact-transfer.md). Remote operators use the Camp API; they do not share a mutable Store. `CAMP_DOCKER_SOCKET` selects an absolute local Docker Unix socket.

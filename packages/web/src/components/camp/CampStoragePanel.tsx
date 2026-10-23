@@ -7,9 +7,9 @@ import type { CampStorage, CampStorageOperation } from "./campApi";
 import CampCandidateReference from "./CampCandidateReference";
 
 type StorageAction = (action: () => Promise<CampStorage>) => Promise<boolean>;
-type StorageCommandAction = "backup" | "restore" | "report-backup";
-const COMMAND_LABELS: Record<StorageCommandAction, MessageId> = { backup: "camp.storage.sourceCommand", restore: "camp.storage.targetCommand", "report-backup": "camp.storage.recoveryCommand" };
-const COMMAND_CONFIG: Record<StorageCommandAction, MessageId> = { backup: "camp.storage.sourceConfig", restore: "camp.storage.targetConfig", "report-backup": "camp.storage.recoveryConfig" };
+type StorageCommandAction = "backup" | "restore" | "report-backup" | "upload" | "download";
+const COMMAND_LABELS: Record<StorageCommandAction, MessageId> = { backup: "camp.storage.sourceCommand", restore: "camp.storage.targetCommand", "report-backup": "camp.storage.recoveryCommand", upload: "camp.storage.uploadCommand", download: "camp.storage.downloadCommand" };
+const COMMAND_CONFIG: Record<StorageCommandAction, MessageId> = { backup: "camp.storage.sourceConfig", restore: "camp.storage.targetConfig", "report-backup": "camp.storage.recoveryConfig", upload: "camp.storage.uploadConfig", download: "camp.storage.downloadConfig" };
 const BLOCKERS: Partial<Record<string, MessageId>> = {
   storage_not_bound: "camp.storage.blocker.storage_not_bound",
   accepted_candidate_required: "camp.storage.blocker.accepted_candidate_required",
@@ -24,8 +24,9 @@ const BLOCKERS: Partial<Record<string, MessageId>> = {
 /** Paths and credentials belong to the local env file, never to this command. */
 export function storageCommand(operationId: string, action: StorageCommandAction): string | null {
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(operationId)) return null;
-  const environment = action === "backup" ? "source" : action === "restore" ? "target" : "recovery";
-  return `node --env-file=.camp/storage-${environment}.env packages/camp-runtime/scripts/storage.mjs ${action} --operation ${operationId}`;
+  const environment = action === "backup" || action === "upload" ? "source" : action === "restore" || action === "download" ? "target" : "recovery";
+  const script = action === "upload" || action === "download" ? "artifacts" : "storage";
+  return `node --env-file=.camp/storage-${environment}.env packages/camp-runtime/scripts/${script}.mjs ${action} --operation ${operationId}`;
 }
 
 function StorageCommand({ operationId, action }: { operationId: string; action: StorageCommandAction }) {
@@ -124,6 +125,7 @@ function StorageOperation({ operation, busy, canManage, onAction, canRestore, on
     <p className="mt-2 break-all font-mono text-xs text-foreground-hint">{operation.id}</p>
     <time className="mt-1 block text-xs text-foreground-hint" dateTime={operation.updatedAt}>{formatDate(operation.updatedAt)} {formatTime(operation.updatedAt)}</time>
     <StorageEvidence operation={operation} />
+    {canManage && operation.backupReceipt && operation.phase !== "cancelled" && <details className="mt-3 rounded border border-border-default p-3" data-testid="camp-storage-transfer"><summary className="cursor-pointer text-xs font-medium">{t({ id: "camp.storage.transferTitle" })}</summary><p className="mt-2 text-xs text-foreground-hint">{t({ id: "camp.storage.transferHelp" })}</p><StorageCommand operationId={operation.backupReceipt.operationId} action="upload" /><StorageCommand operationId={operation.id} action="download" /></details>}
     {canManage && operation.phase === "prepared" && <StorageCommand operationId={operation.id} action="backup" />}
     {canManage && operation.phase === "prepared" && <details className="mt-3 rounded border border-border-default p-3" data-testid="camp-storage-report-recovery"><summary className="cursor-pointer text-xs font-medium">{t({ id: "camp.storage.recoveryTitle" })}</summary><p className="mt-2 text-xs text-foreground-hint">{t({ id: "camp.storage.recoveryHelp" })}</p><StorageCommand operationId={operation.id} action="report-backup" /></details>}
     {canManage && operation.kind === "migration" && operation.phase === "backup_ready" && <StorageCommand operationId={operation.id} action="restore" />}

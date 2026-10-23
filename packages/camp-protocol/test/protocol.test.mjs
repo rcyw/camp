@@ -48,7 +48,7 @@ test('missing tools, yield support and storage formats are diagnosed before allo
   assert.deepEqual(result.missingTaskKinds, ['plan']);
   assert.deepEqual(result.missingRefKinds, ['layer']);
   assert.deepEqual(result.missingCapabilities, ['questions.v1', 'checkpoint-yield.v1']);
-  assert.equal(CAMP_CAPABILITIES.length, 11);
+  assert.equal(CAMP_CAPABILITIES.length, 13);
 });
 
 test('a commit-only observer can review a commit but cannot build from a layer', () => {
@@ -63,7 +63,7 @@ test('declarations reject malformed input and never mutate caller-owned arrays',
   const declaration = createWorkerDeclaration();
   for (const patch of [{ protocolVersions: [] }, { protocolVersions: [1, 1] }, { protocolVersions: ['1'] }, { capabilities: ['a', 'a'] }, { capabilities: ['../../credentials'] }, { workerVersion: '' }, { token: 'not-a-protocol-field' }, { taskKinds: Array(33).fill('plan') }]) assert.throws(() => parseWorkerDeclaration({ ...declaration, ...patch }));
   const parsed = parseWorkerDeclaration(declaration); parsed.capabilities.pop();
-  assert.equal(declaration.capabilities.length, 11);
+  assert.equal(declaration.capabilities.length, 13);
   assert.equal(parseServerProtocol(serverProtocol()).schemaVersion, 1);
   for (const patch of [{ schemaVersion: 2 }, { supportedProtocolVersions: [99] }, { token: 'unexpected' }]) assert.throws(() => parseServerProtocol({ ...serverProtocol(), ...patch }));
 });
@@ -109,6 +109,6 @@ test('the same dependency-free module runs in a browser', async () => {
         return { version: protocol.CAMP_PROTOCOL_VERSION, candidate: protocol.parseCandidate(candidate), compatible: protocol.checkWorkerCompatibility(protocol.createWorkerDeclaration(), protocol.getTaskRequirements({ protocolVersion: 3, workflow: 'serial', taskKind: 'build', inputCandidate: candidate })).status };
       } finally { URL.revokeObjectURL(url); }
     }, { source, candidate });
-    assert.equal(result.version, 4); assert.equal(result.compatible, 'compatible'); assert.equal(result.candidate.layerId, candidate.refId);
+    assert.equal(result.version, 5); assert.equal(result.compatible, 'compatible'); assert.equal(result.candidate.layerId, candidate.refId);
   } finally { await browser.close(); }
 });

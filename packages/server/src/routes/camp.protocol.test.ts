@@ -1,4 +1,4 @@
-import { CAMP_CAPABILITIES, getTaskRequirements } from "../../../camp-protocol/src/index.js";
+import { CAMP_CAPABILITIES, CAMP_SUPPORTED_PROTOCOL_VERSIONS, getTaskRequirements } from "../../../camp-protocol/src/index.js";
 import assert from "node:assert/strict";
 import { createHmac, randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
@@ -48,7 +48,7 @@ apiTest("Camp requires a declaration for new serial allocation and records compa
 
 apiTest("Camp rejects malformed declarations and unknown envelope fields while advertising the shared protocol read-only", async ({ seed, http, app, db }) => {
   const kit = await fixture({ seed, http, app });
-  const info = await kit.worker("/protocol"); assert.equal(info.status, 200); const metadata = await info.json() as { supportedProtocolVersions: number[]; capabilities: string[] }; assert.deepEqual(metadata.supportedProtocolVersions, [1, 2, 3, 4]); assert.deepEqual([...metadata.capabilities].sort(), [...CAMP_CAPABILITIES].sort());
+  const info = await kit.worker("/protocol"); assert.equal(info.status, 200); const metadata = await info.json() as { supportedProtocolVersions: number[]; capabilities: string[] }; assert.deepEqual(metadata.supportedProtocolVersions, [...CAMP_SUPPORTED_PROTOCOL_VERSIONS]); assert.deepEqual([...metadata.capabilities].sort(), [...CAMP_CAPABILITIES].sort());
   for (const protocol of [
     { ...fullProtocol, internal: true }, { ...fullProtocol, protocolVersions: [] },
     { ...fullProtocol, protocolVersions: [0] }, { ...fullProtocol, workerVersion: "x".repeat(101) },

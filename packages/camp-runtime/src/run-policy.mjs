@@ -50,7 +50,10 @@ export function completionPolicy(claim, context, inputCandidate, candidate) {
   if (question) {
     return { status: 'suspended', questionId: question.id };
   }
-  if (claim.workflow === 'serial' && claim.taskKind !== 'clarification') checkedPlan(context.plan);
+  if (claim.workflow === 'serial' && claim.taskKind !== 'clarification') {
+    const plan = checkedPlan(context.plan);
+    if (plan.revision !== (claim.protocolVersion >= 5 ? 2 : 1)) throw new Error('Structured plan revision differs from the frozen execution protocol');
+  }
   if (claim.taskKind === 'clarification' && !['answered', 'awaiting_human'].includes((context.assignedQuestion ?? context.question)?.status)) throw new Error('Clarification must durably answer or escalate its assigned question');
   if (claim.workflow === 'serial' && claim.taskKind === 'summary' && (typeof context.finalization?.summary !== 'string' || !context.finalization.summary.trim())) throw new Error('Planner summary must record camp_finalize before completing');
   if (['review', 'final_review'].includes(claim.taskKind)) {

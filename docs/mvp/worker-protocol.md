@@ -1,8 +1,8 @@
 # Worker 协议与能力协商
 
-本阶段在单 Room 自主交付之上建立可版本化的执行契约。目标是把不兼容部署挡在任务领取之前，并为后续多个 Worker、sandbox 适配器和滚动升级提供明确边界。它不增加并行任务图或自动合并。
+本阶段在单 Room 自主交付之上建立可版本化的执行契约。目标是把不兼容部署挡在任务领取之前，并为后续多个 Worker、sandbox 适配器和滚动升级提供明确边界。协议 5 的有界依赖图在独立契约中定义。
 
-当前版本已推进至 Worker 0.6.0、协议 1/2/3/4 支持。默认逐项目标继续冻结协议 2；协议 3 用于依次执行的同基线双候选，见 [可信集成](./trusted-integration.md)；协议 4 仅用于显式的 `parallel_pair`，见 [有界并行执行](./bounded-pair-execution.md)。下文保留协议 1 的设计和升级验收记录。协议 1 的既有目标与结果重放继续使用原契约。
+当前版本已推进至 Worker 0.7.0、协议 1/2/3/4/5 支持。默认逐项目标继续冻结协议 2；协议 3 用于依次执行的同基线双候选，见 [可信集成](./trusted-integration.md)；协议 4 仅用于显式的 `parallel_pair`，见 [有界并行执行](./bounded-pair-execution.md)。协议 5 用于显式 `bounded_dag`，需要 `structured-plan.v2`、`bounded-dag.v1` 与受监督执行池，见[有界依赖图](./bounded-dag.md)。下文保留协议 1 的设计和升级验收记录。协议 1 的既有目标与结果重放继续使用原契约。
 
 协议 4 领取需要 `bounded-pair.v1` 和精确的 `executionPool` 声明。Room 固定存储域，Goal 固定池、两条 lane 和资源上限；不匹配时零分配、零预算。未启用池的串行 Worker 只声明到版本 3。静态插件检查使用 `getPluginTaskRequirements` 投影模型所需能力，不要求 DSH 插件持有宿主机的资源管理、可信合并或验证能力。
 

@@ -24,6 +24,7 @@ export default function CampGoalComposer({ channelId, busy, onSubmit, defaultBud
   const [planMode, setPlanMode] = useState<CampPlanMode>("sequential");
   const supportsPair = supportedPlanModes?.includes("same_baseline_pair") === true;
   const supportsParallel = supportedPlanModes?.includes("parallel_pair") === true;
+  const supportsDag = supportedPlanModes?.includes("bounded_dag") === true;
   const unsupportedMode = planMode !== "sequential" && !supportedPlanModes?.includes(planMode);
   const [maxRuns, setMaxRuns] = useState(String(defaultBudget?.maxRuns ?? DEFAULT_CAMP_BUDGET.maxRuns));
   const [maxReviewRounds, setMaxReviewRounds] = useState(String(defaultBudget?.maxReviewRounds ?? DEFAULT_CAMP_BUDGET.maxReviewRounds));
@@ -32,8 +33,8 @@ export default function CampGoalComposer({ channelId, busy, onSubmit, defaultBud
   const editGoal = useCallback((event: ChangeEvent<HTMLTextAreaElement>) => setGoal(event.target.value), []);
   const editMode = useCallback((event: ChangeEvent<HTMLSelectElement>) => {
     const value = event.target.value;
-    if (value === "sequential" || (value === "same_baseline_pair" && supportsPair) || (value === "parallel_pair" && supportsParallel)) setPlanMode(value);
-  }, [supportsPair, supportsParallel]);
+    if (value === "sequential" || (value === "same_baseline_pair" && supportsPair) || (value === "parallel_pair" && supportsParallel) || (value === "bounded_dag" && supportsDag)) setPlanMode(value);
+  }, [supportsPair, supportsParallel, supportsDag]);
   const editRuns = useCallback((event: ChangeEvent<HTMLInputElement>) => setMaxRuns(event.target.value), []);
   const editReviewRounds = useCallback((event: ChangeEvent<HTMLInputElement>) => setMaxReviewRounds(event.target.value), []);
   const editMinutes = useCallback((event: ChangeEvent<HTMLInputElement>) => setMaxMinutes(event.target.value), []);
@@ -59,11 +60,12 @@ export default function CampGoalComposer({ channelId, busy, onSubmit, defaultBud
       <label htmlFor={`camp-goal-${channelId}`} className="font-medium">{t({ id: "camp.goal" })}</label>
       <Textarea id={`camp-goal-${channelId}`} value={goal} onChange={editGoal} placeholder={t({ id: "camp.goalPlaceholder" })} rows={3} maxLength={CAMP_LIMITS.text} required />
       <p className="text-xs text-foreground-hint">{t({ id: "camp.commandHint" })}</p>
-      {(supportsPair || supportsParallel || unsupportedMode) && <div className="flex flex-col gap-2 rounded-lg border border-border-default p-3">
+      {(supportsPair || supportsParallel || supportsDag || unsupportedMode) && <div className="flex flex-col gap-2 rounded-lg border border-border-default p-3">
         <label className="flex flex-col gap-2 text-sm">{t({ id: "camp.planMode.label" })}<select value={planMode} onChange={editMode} disabled={busy} className="rounded border border-border-default bg-layer-canvas p-2 text-sm" data-testid="camp-plan-mode">
           <option value="sequential">{t({ id: "camp.planMode.sequential" })}</option>
           <option value="same_baseline_pair" disabled={!supportsPair}>{t({ id: "camp.planMode.same_baseline_pair" })}</option>
           {(supportsParallel || planMode === "parallel_pair") && <option value="parallel_pair" disabled={!supportsParallel}>{t({ id: "camp.planMode.parallel_pair" })}</option>}
+          {(supportsDag || planMode === "bounded_dag") && <option value="bounded_dag" disabled={!supportsDag}>{t({ id: "camp.planMode.bounded_dag" })}</option>}
         </select></label>
         <p className="text-xs text-foreground-hint">{t({ id: planModeHelp(planMode) })}</p>
         {unsupportedMode && <p className="text-xs text-danger-strong" role="status">{t({ id: "camp.planMode.unavailable" })}</p>}

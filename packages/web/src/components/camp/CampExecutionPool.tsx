@@ -1,10 +1,11 @@
 import { useIntl } from "react-intl";
 import type { CampGoal } from "./campApi";
+import { usesExecutionPool } from "./campPlanMode";
 
 /** A frozen admission declaration. It does not report live cgroup utilization. */
 export default function CampExecutionPool({ goal }: { goal: CampGoal }) {
   const { formatMessage: t, formatNumber } = useIntl();
-  if (goal.planMode !== "parallel_pair") return null;
+  if (!usesExecutionPool(goal.planMode)) return null;
   const pool = goal.executionPool;
   return <section className="rounded-lg border border-border-default p-4" aria-label={t({ id: "camp.pool.title" })} data-testid="camp-execution-pool" data-pool-id={pool?.poolId}>
     <h5 className="text-sm font-medium">{t({ id: "camp.pool.title" })}</h5>

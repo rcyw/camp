@@ -48,7 +48,7 @@ export function createRunClient(context, transport = fetch) {
     send: (content, toRole, kind, signal) => request(`/rooms/${encodeURIComponent(context.roomId)}/messages`, { content, kind, ...(toRole ? { toRole } : {}) }, signal),
     /** @param {'progress'|'artifact'} type @param {string} content @param {Record<string, unknown> | undefined} artifact @param {AbortSignal} [signal] */
     event: (type, content, artifact, signal) => request(`/runs/${encodeURIComponent(context.runId)}/events`, { type, content, ...(artifact ? { artifact } : {}) }, signal),
-    /** @param {{summary: string, tasks: Array<{key: string, title: string, description: string, acceptance: string, verification: string}>}} plan @param {AbortSignal} [signal] */
+    /** @param {{planRevision?:1|2,summary:string,tasks:import('../../camp-protocol/src/index.js').CampPlanItem[]}} plan @param {AbortSignal} [signal] */
     submitPlan: (plan, signal) => request(`/runs/${encodeURIComponent(context.runId)}/plan`, parsePlanSubmission({ planRevision: 1, ...plan }), signal),
     /** @param {{questionId: string, content: string, toRole: string, needsHuman?: boolean}} question @param {AbortSignal} [signal] */
     askQuestion: (question, signal) => request(`/runs/${encodeURIComponent(context.runId)}/questions`, question, signal),

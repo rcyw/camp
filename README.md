@@ -28,9 +28,13 @@ bundles, connection diagnostics, resource bounds and offline cleanup/recovery.
 The [storage lifecycle](docs/mvp/storage-lifecycle.md) defines cold candidate
 backups, isolated restore and explicit storage migration while retaining
 candidate identities and historical execution evidence.
+The [bounded DAG contract](docs/mvp/bounded-dag.md) adds protocol 5 dependencies
+with reviewed inputs and repeated trusted joins. [Private artifact transport](docs/mvp/private-artifact-transfer.md)
+carries cold backups over the authenticated API for explicit Worker handoff.
+Two-host acceptance and concurrent remote writers have separate release gates.
 The [durable execution design](docs/mvp/durable-execution.md) covers goal budgets,
-worker recovery and result outboxes; [future dependency plans](docs/mvp/durable-workflows-next.md)
-describe the separate graph scheduling stage.
+worker recovery and result outboxes; [workflow evolution](docs/mvp/durable-workflows-next.md)
+retains the earlier design rationale.
 
 Camp is an independently maintained fork of
 [Raft](https://github.com/botiverse/raft-source). Development and customizations

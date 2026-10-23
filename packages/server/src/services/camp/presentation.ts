@@ -1,3 +1,5 @@
+import { parsePlan } from "../../../../camp-protocol/src/index.js";
+import { dagNodes, dagProjection } from "./dag";
 import { roomOccupancy } from "./executionPool";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import { getDb } from "../../db/index";
@@ -20,9 +22,11 @@ export async function goalDeliverySnapshot(goal: Goal, canPost: boolean) {
     return { ...question, canAnswer: canPost && ["queued", "running", "waiting_question"].includes(goal.status) && question.status === "awaiting_human" && (!clarification || clarification.status === "completed") };
   });
   const occupied = await roomOccupancy(db, goal.roomId);
+  const nodeRows = goal.planMode === "bounded_dag" ? await dagNodes(db, goal) : [];
   const items = (plan?.items ?? []).map((item, index) => {
     const stages = bindings.filter(binding => binding.planItemKey === item.key);
-    const latest = stages[stages.length - 1];
+    const node = nodeRows.find(value => value.key === item.key);
+    const latest = node?.activeTaskId ? stages.find(stage => stage.taskId === node.activeTaskId) : stages[stages.length - 1];
     const reviews = stages.filter(binding => binding.kind === "review").flatMap(binding => runs.filter(run => run.taskId === binding.taskId && run.status === "completed").map(run => {
       const artifact = run.artifacts.find(value => value.type === "review");
       return { runId: run.id, outcome: run.outcome, evidence: artifact?.evidence ?? "", summary: artifact?.summary ?? run.summary ?? "", candidate: run.inputCandidate ?? null, createdAt: run.completedAt ?? run.createdAt };
@@ -32,14 +36,16 @@ export async function goalDeliverySnapshot(goal: Goal, canPost: boolean) {
     const status = !latest ? "pending" : ["failed", "blocked", "cancelled"].includes(latest.status) ? "needs_attention"
       : latest.kind === "review" && latest.status === "completed" && latestReview?.outcome === "approved" ? "approved"
         : latest.kind === "review" ? "reviewing" : "building";
-    const schedulingState = status === "approved" ? "approved" : !latest ? "pending" : latest.status === "waiting_question" ? "waiting_question" : ["blocked", "failed", "cancelled"].includes(latest.status) ? "blocked" : latest.status === "running" ? "running" : latest.status === "queued" && occupied.length >= (goal.planMode === "parallel_pair" ? 2 : 1) ? "waiting_capacity" : latest.kind === "review" && latest.status === "queued" ? "waiting_review" : latest.status === "queued" ? "ready" : "pending";
-    const scheduling = { state: schedulingState, reason: schedulingState === "waiting_capacity" ? occupied.some(run => run.status !== "running") ? "cleanup_pending" : "room_capacity" : schedulingState === "waiting_review" ? "reviewer_queue" : schedulingState === "waiting_question" ? "question_pending" : schedulingState === "blocked" ? goal.reason : null };
-    return { ...item, index, status, scheduling, role: "builder", reworkCount: Math.max(0, stages.filter(binding => binding.kind === "build").length - 1), candidate: latestRun?.inputCandidate && latest.kind === "review" ? latestRun.inputCandidate : latestRun?.candidate ?? latest?.inputCandidate ?? null, reviews };
+    const dependencyKeys = "dependsOnKeys" in item ? item.dependsOnKeys : [];
+    const blockedByKeys = dependencyKeys.filter(key => nodeRows.find(value => value.key === key)?.status !== "approved");
+    const schedulingState = node?.status === "blocked" ? "blocked" : node?.status === "waiting_dependencies" ? "waiting_dependencies" : node?.status === "waiting_integration" ? "waiting_integration" : status === "approved" ? "approved" : !latest ? "pending" : latest.status === "waiting_question" ? "waiting_question" : ["blocked", "failed", "cancelled"].includes(latest.status) ? "blocked" : latest.status === "running" ? "running" : latest.status === "queued" && occupied.length >= (["parallel_pair", "bounded_dag"].includes(goal.planMode) ? 2 : 1) ? "waiting_capacity" : latest.kind === "review" && latest.status === "queued" ? "waiting_review" : latest.status === "queued" ? "ready" : "pending";
+    const scheduling = { state: schedulingState, blockedByKeys, reason: schedulingState === "waiting_dependencies" ? "dependencies_pending" : schedulingState === "waiting_integration" ? "node_integration_pending" : schedulingState === "waiting_capacity" ? occupied.some(run => run.status !== "running") ? "cleanup_pending" : "room_capacity" : schedulingState === "waiting_review" ? "reviewer_queue" : schedulingState === "waiting_question" ? "question_pending" : schedulingState === "blocked" ? goal.reason : null };
+    return { ...item, dependsOnKeys: dependencyKeys, inputSources: node?.inputSources ?? [], inputResolution: node?.inputResolution ?? null, inputCandidate: node?.inputCandidate ?? null, scopedIntegrationOperationId: node?.inputOperationId ?? null, index, status, scheduling, role: "builder", reworkCount: Math.max(0, stages.filter(binding => binding.kind === "build").length - 1), candidate: latestRun?.inputCandidate && latest?.kind === "review" ? latestRun.inputCandidate : latestRun?.candidate ?? latest?.inputCandidate ?? null, reviews };
   });
   const elapsedSeconds = goal.startedAt ? Math.max(0, Math.floor(((goal.completedAt?.getTime() ?? Date.now()) - goal.startedAt.getTime()) / 1000)) : 0;
   const humanAnswers = questions.filter(question => question.answer !== null && (question.answerByUserId !== null || question.answerByRole === "human")).length;
   const agentAnswers = questions.filter(question => question.answer !== null && question.answerByUserId === null && question.answerByRole !== "human").length;
-  return { plan: plan ? { revision: 1 as const, summary: plan.summary, tasks: plan.items } : null, items, questions, metrics: {
+  return { graph: await dagProjection(goal), plan: plan ? parsePlan({ revision: plan.revision, summary: plan.summary, tasks: plan.items }) : null, items, questions, metrics: {
     runs: goal.runCount, reviewRounds: goal.reviewRounds, elapsedSeconds, itemsTotal: items.length, itemsApproved: items.filter(item => item.status === "approved").length,
     questionsAsked: questions.length, questionsAnswered: questions.filter(question => question.answer !== null).length,
     humanAnswers, agentAnswers, roleAnswers: agentAnswers, manualRetries: goal.attempt - 1,

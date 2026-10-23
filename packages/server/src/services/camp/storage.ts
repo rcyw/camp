@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { and, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import { parseCandidate, parseStoragePlan, serializeStoragePlan, parseStorageBackupReceipt, parseStorageRestoreReceipt, type CampCandidate, type CampStoragePlan } from "../../../../camp-protocol/src/index.js";
 import { getDb, type DatabaseExecutor } from "../../db/index";
-import { campEvents, campFinalizations, campGoals, campOperations, campQuestions, campRooms, campRuns, campStorageOperations, campTasks } from "../../db/schema";
+import { campDagNodes, campEvents, campFinalizations, campGoals, campOperations, campQuestions, campRooms, campRuns, campStorageOperations, campTasks } from "../../db/schema";
 import { getActorServerRoleInServer } from "../../lib/actorPermissions";
 import { roomForUser, withCampRoomAdmin } from "./rooms";
 import { requireWorker, validateWorker } from "./runs";
@@ -55,8 +55,8 @@ async function candidateInventory(tx: DatabaseExecutor, room: Room): Promise<Cam
     found.set(candidate.refId, candidate);
   };
   add(room.acceptedCandidate);
-  const goals = await tx.select({ baseCandidate: campGoals.baseCandidate, currentCandidate: campGoals.currentCandidate, finalCandidate: campGoals.finalCandidate, reviewedItems: campGoals.reviewedItems }).from(campGoals).where(eq(campGoals.roomId, room.id));
-  for (const goal of goals) { add(goal.baseCandidate); add(goal.currentCandidate); add(goal.finalCandidate); for (const item of Object.values(goal.reviewedItems)) add(item.candidate); }
+  const goals = await tx.select({ baseCandidate: campGoals.baseCandidate, currentCandidate: campGoals.currentCandidate, finalCandidate: campGoals.finalCandidate, reviewedItems: campGoals.reviewedItems, dagCandidate: sql<CampCandidate | null>`${campGoals.dagDelivery}->'candidate'` }).from(campGoals).where(eq(campGoals.roomId, room.id));
+  for (const goal of goals) { add(goal.baseCandidate); add(goal.currentCandidate); add(goal.finalCandidate); add(goal.dagCandidate); for (const item of Object.values(goal.reviewedItems)) add(item.candidate); }
   const runs = await tx.select({ inputCandidate: campRuns.inputCandidate, candidate: campRuns.candidate,
     changeBase: sql<CampCandidate | null>`${campRuns.changeSet}->'base'`, changeTarget: sql<CampCandidate | null>`${campRuns.changeSet}->'target'`,
     artifacts: sql<unknown[]>`(SELECT coalesce(jsonb_agg(jsonb_strip_nulls(jsonb_build_object('type', a->'type', 'projectId', a->'projectId', 'refKind', a->'refKind', 'refId', a->'refId', 'commitId', a->'commitId', 'layerId', a->'layerId', 'rootId', a->'rootId', 'imageId', a->'imageId'))), '[]'::jsonb) FROM jsonb_array_elements(${campRuns.artifacts}) a WHERE a->>'type' = 'layerfs')`,
@@ -70,6 +70,8 @@ async function candidateInventory(tx: DatabaseExecutor, room: Room): Promise<Cam
   // reference remains part of this Room's durable historical inventory.
   const events = await tx.select({ candidate: sql<CampCandidate>`jsonb_strip_nulls(jsonb_build_object('type', ${campEvents.artifact}->'type', 'projectId', ${campEvents.artifact}->'projectId', 'refKind', ${campEvents.artifact}->'refKind', 'refId', ${campEvents.artifact}->'refId', 'commitId', ${campEvents.artifact}->'commitId', 'layerId', ${campEvents.artifact}->'layerId', 'rootId', ${campEvents.artifact}->'rootId', 'imageId', ${campEvents.artifact}->'imageId'))` }).from(campEvents).where(and(eq(campEvents.roomId, room.id), sql`${campEvents.artifact}->>'type' = 'layerfs'`));
   for (const event of events) add(event.candidate);
+  const graphNodes = await tx.select({ input: campDagNodes.inputCandidate, approved: sql<CampCandidate | null>`${campDagNodes.approvedProducer}->'candidate'`, sources: campDagNodes.inputSources }).from(campDagNodes).innerJoin(campGoals, eq(campGoals.id, campDagNodes.goalId)).where(eq(campGoals.roomId, room.id));
+  for (const node of graphNodes) { add(node.input); add(node.approved); for (const parent of node.sources) add(parent.candidate); }
   const bindings = await tx.select({ candidate: campTasks.inputCandidate }).from(campTasks).where(eq(campTasks.roomId, room.id)); for (const binding of bindings) add(binding.candidate);
   const questions = await tx.select({ candidate: campQuestions.candidate }).from(campQuestions).where(eq(campQuestions.roomId, room.id)); for (const question of questions) add(question.candidate);
   const finalizations = await tx.select({ candidate: campFinalizations.candidate }).from(campFinalizations).where(eq(campFinalizations.roomId, room.id)); for (const finalization of finalizations) add(finalization.candidate);
@@ -141,7 +143,7 @@ export async function createStorageOperation(roomId: string, userId: string, inp
     const storage = await storageSnapshot(roomId, true, tx); return { operation: storage.operations.find(operation => operation.id === operationId)!, storage };
   });
 }
-async function workerStorageOperation(tx: DatabaseExecutor, principal: CampPrincipal, operationId: string) {
+export async function workerStorageOperation(tx: DatabaseExecutor, principal: CampPrincipal, operationId: string) {
   requireWorker(principal);
   const [room] = await tx.select().from(campRooms).where(eq(campRooms.id, principal.roomId)).for("update"); if (!room) throw new CampError(404, "room_not_found", "Room not found");
   await validateWorker(tx, principal);

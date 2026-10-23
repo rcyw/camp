@@ -78,8 +78,69 @@ async function fixture(options = {}) {
     assert(source); await cp(directories[source], output, { recursive: true, dereference: false });
   };
   const run = extra => runTrustedIntegration({ runtime, ownerRun, integrationInput: input, materialize, onResult: async value => { events.push('staged'); assert.deepEqual(parseIntegrationReport(value), value); await access(join(ownerRun.folder, 'integration-base')); }, ...extra });
-  return { folder, directories, candidates, input, runtime, ownerRun, events, calls, branches, refresh, run, async close() { await rm(folder, { recursive: true, force: true }); } };
+  return { folder, directories, candidates, nodes, input, runtime, ownerRun, events, calls, branches, refresh, run, async close() { await rm(folder, { recursive: true, force: true }); } };
 }
+async function dagFixture(options = {}) {
+  const f = await fixture({ ...options, baseCommit: true }); f.input.algorithm = 'layerfs-three-way-v2';
+  const layer = '32' + '1'.repeat(64), commit = digit => '12' + digit.repeat(64);
+  const b = commit('6'), merge = commit('7');
+  for (const refId of [b, merge]) f.nodes.set(refId, { ...f.candidates.base, refId, commitId: refId });
+  const records = new Map([
+    [f.candidates.base.refId, { id: f.candidates.base.refId, root: f.candidates.base.rootId, parent: null, secondParent: null, base: layer }],
+    [b, { id: b, root: f.candidates.base.rootId, parent: null, secondParent: null, base: layer }],
+    [merge, { id: merge, root: f.candidates.base.rootId, parent: f.candidates.base.refId, secondParent: b, base: layer }],
+    [f.candidates.left.refId, { id: f.candidates.left.refId, root: f.candidates.left.rootId, parent: merge, secondParent: null, base: layer }],
+    [f.candidates.right.refId, { id: f.candidates.right.refId, root: f.candidates.right.rootId, parent: f.candidates.base.refId, secondParent: null, base: layer }],
+  ]);
+  const original = f.runtime.sdk;
+  f.runtime.sdk = async (project, method, args, ...rest) => {
+    if (method !== 'branch.list_commits') return original(project, method, args, ...rest);
+    f.calls.push({ method, args });
+    const items = [], seen = new Set(); let ref = f.branches.get(args[0])?.refId;
+    while (ref && !seen.has(ref)) { seen.add(ref); const row = records.get(ref); if (!row) break; items.push(row); ref = row.parent; }
+    return { items, hasMore: false, nextPagePos: null };
+  };
+  return { ...f, records, secondary: b };
+}
+test('v2 proves secondary-parent ancestry and persists its exact proof before accepting the native result', async () => {
+  const f = await dagFixture();
+  try {
+    const value = await f.run(); assert.equal(value.status, 'merged');
+    const intent = JSON.parse(await readFile(join(f.ownerRun.folder, 'integration-intent.json')));
+    assert(intent.inspections.some(item => item.refId === f.secondary));
+    const proof = JSON.parse(await readFile(join(f.ownerRun.folder, 'integration-ancestry.json')));
+    assert.equal(proof.proof.mergeBase, f.input.base.refId);
+    const calls = f.calls.length;
+    assert.equal((await recoverTrustedIntegration({ runtime: f.runtime, ownerRun: f.ownerRun, integrationInput: f.input })).status, 'validated');
+    assert.equal(f.calls.slice(calls).some(call => ['branch.fork', 'branch.merge'].includes(call.method)), false);
+    await rm(join(f.ownerRun.folder, 'integration-ancestry.json'));
+    await assert.rejects(recoverTrustedIntegration({ runtime: f.runtime, ownerRun: f.ownerRun, integrationInput: f.input }), { code: 'camp_integration_inspection_required' });
+  } finally { await f.close(); }
+});
+test('v2 criss-cross rejection is durable and never invokes native merge', async () => {
+  const f = await dagFixture();
+  try {
+    f.records.get(f.candidates.right.refId).secondParent = f.secondary;
+    const value = await f.run(); assert.equal(value.status, 'rejected');
+    assert.equal(f.calls.some(call => call.method === 'branch.merge'), false);
+    assert.equal((await recoverTrustedIntegration({ runtime: f.runtime, ownerRun: f.ownerRun, integrationInput: f.input })).status, 'validated');
+  } finally { await f.close(); }
+});
+test('an uncertain v2 inspection fork is retained for inspection and is never retried', async () => {
+  const f = await dagFixture();
+  try {
+    const original = f.runtime.sdk;
+    f.runtime.sdk = async (...args) => {
+      const result = await original(...args);
+      if (args[1] === 'branch.fork' && args[2][0].includes('-h-')) throw new Error('Inspection fork reply lost');
+      return result;
+    };
+    await assert.rejects(f.run(), { code: 'camp_integration_inspection_required' });
+    const count = f.calls.length;
+    assert.equal((await recoverTrustedIntegration({ runtime: f.runtime, ownerRun: f.ownerRun, integrationInput: f.input })).status, 'requires_inspection');
+    assert.equal(f.calls.length, count); assert.equal(f.calls.some(call => call.method === 'branch.merge'), false);
+  } finally { await f.close(); }
+});
 test('complete disjoint binary, deletion and mode facts survive integration before cleanup', async () => {
   const f = await fixture();
   try {

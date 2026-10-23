@@ -3,9 +3,10 @@
     1,
     2,
     3,
-    4
+    4,
+    5
   ],
-  "workerVersion": "0.6.0",
+  "workerVersion": "0.7.0",
   "taskKinds": [
     "plan",
     "build",
@@ -26,6 +27,7 @@
     "candidate-review.v1",
     "finalize.v1",
     "checkpoint-yield.v1",
-    "candidate-diff.v1"
+    "candidate-diff.v1",
+    "structured-plan.v2"
   ]
 }

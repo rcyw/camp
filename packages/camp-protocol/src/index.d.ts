@@ -1,4 +1,10 @@
 // Generated from index.js by scripts/declarations.mjs. Do not edit.
+/** Private, immutable cold bundles only. A transfer is not a proof of native
+ * candidate reachability; quarantined restoration must still verify history.
+ * @param {unknown} value @returns {CampPrivateArtifactManifest} */
+export function parsePrivateArtifactManifest(value: unknown): CampPrivateArtifactManifest;
+/** @param {unknown} value */
+export function serializePrivateArtifactManifest(value: unknown): string;
 /** @param {unknown} value @returns {CampStoragePlan} */
 export function parseStoragePlan(value: unknown): CampStoragePlan;
 /** @param {unknown} value @returns {string} */
@@ -72,12 +78,11 @@ export function serializeIntegrationInput(value: unknown): string;
 export function parseIntegrationReport(value: unknown): CampIntegrationReport;
 /** @param {unknown} value @returns {CampPlanItem} */
 export function parsePlanItem(value: unknown): CampPlanItem;
-/** @param {unknown} value @returns {{planRevision:1,summary:string,tasks:CampPlanItem[]}} */
-export function parsePlanSubmission(value: unknown): {
-    planRevision: 1;
-    summary: string;
-    tasks: CampPlanItem[];
-};
+/** Revision 2 never infers dependencies from item order.
+ * @param {unknown} value @returns {CampDagPlanItem} */
+export function parseDagPlanItem(value: unknown): CampDagPlanItem;
+/** @param {unknown} value @returns {CampPlanSubmission} */
+export function parsePlanSubmission(value: unknown): CampPlanSubmission;
 /** @param {unknown} value @returns {CampPlan} */
 export function parsePlan(value: unknown): CampPlan;
 /** A bounded self-report, never a remote attestation or a model-key test.
@@ -86,10 +91,10 @@ export function parsePlan(value: unknown): CampPlan;
  * @param {unknown} value @returns {CampPreflightReport} */
 export function parsePreflightReport(value: unknown): CampPreflightReport;
 /** Pure wire contracts. No Node, browser, database, DSH or sandbox imports. */
-export const CAMP_PROTOCOL_VERSION: 4;
+export const CAMP_PROTOCOL_VERSION: 5;
 export const CAMP_SUPPORTED_PROTOCOL_VERSIONS: readonly number[];
-export const CAMP_WORKER_VERSION: "0.6.0";
-export const CAMP_PLAN_MODES: readonly ["sequential", "same_baseline_pair", "parallel_pair"];
+export const CAMP_WORKER_VERSION: "0.7.0";
+export const CAMP_PLAN_MODES: readonly ["sequential", "same_baseline_pair", "parallel_pair", "bounded_dag"];
 export const CAMP_ROLES: readonly ["planner", "builder", "reviewer"];
 export const CAMP_AGENT_TASK_KINDS: readonly ["plan", "build", "review", "final_review", "summary", "clarification"];
 export const CAMP_TASK_KINDS: readonly ["plan", "build", "review", "final_review", "summary", "clarification", "verification", "integration"];
@@ -97,8 +102,10 @@ export const CAMP_REF_KINDS: readonly ["layer", "commit"];
 export const CAMP_CAPABILITIES_V1: readonly ["dsh.acp.v1", "layerfs.candidate.v1", "structured-plan.v1", "questions.v1", "candidate-review.v1", "finalize.v1", "checkpoint-yield.v1"];
 export const CAMP_CAPABILITIES_V2: readonly ["dsh.acp.v1", "layerfs.candidate.v1", "structured-plan.v1", "questions.v1", "candidate-review.v1", "finalize.v1", "checkpoint-yield.v1", "candidate-diff.v1", "trusted-verification.v1"];
 export const CAMP_CAPABILITIES_V3: readonly ["dsh.acp.v1", "layerfs.candidate.v1", "structured-plan.v1", "questions.v1", "candidate-review.v1", "finalize.v1", "checkpoint-yield.v1", "candidate-diff.v1", "trusted-verification.v1", "trusted-integration.v1"];
-export const CAMP_CAPABILITIES: readonly ["dsh.acp.v1", "layerfs.candidate.v1", "structured-plan.v1", "questions.v1", "candidate-review.v1", "finalize.v1", "checkpoint-yield.v1", "candidate-diff.v1", "trusted-verification.v1", "trusted-integration.v1", "bounded-pair.v1"];
+export const CAMP_CAPABILITIES_V4: readonly ["dsh.acp.v1", "layerfs.candidate.v1", "structured-plan.v1", "questions.v1", "candidate-review.v1", "finalize.v1", "checkpoint-yield.v1", "candidate-diff.v1", "trusted-verification.v1", "trusted-integration.v1", "bounded-pair.v1"];
+export const CAMP_CAPABILITIES: readonly ["dsh.acp.v1", "layerfs.candidate.v1", "structured-plan.v1", "questions.v1", "candidate-review.v1", "finalize.v1", "checkpoint-yield.v1", "candidate-diff.v1", "trusted-verification.v1", "trusted-integration.v1", "bounded-pair.v1", "structured-plan.v2", "bounded-dag.v1"];
 export const CAMP_INTEGRATION_ALGORITHM: "layerfs-three-way-v1";
+export const CAMP_DAG_INTEGRATION_ALGORITHM: "layerfs-three-way-v2";
 export const CAMP_INTEGRATION_POLICY: "reject-overlap-v1";
 export const CAMP_INTEGRATION_LIMITS: Readonly<{
     maxConflicts: 100;
@@ -134,6 +141,11 @@ export const CAMP_LIMITS: Readonly<{
     remainingItems: 20;
     remainingText: 4000;
 }>;
+export const CAMP_DAG_LIMITS: Readonly<{
+    nodes: 6;
+    parents: 2;
+    sinks: 2;
+}>;
 export const DEFAULT_CAMP_BUDGET: Readonly<{
     maxRuns: 12;
     maxReviewRounds: 3;
@@ -163,6 +175,13 @@ export const CAMP_STORAGE_LIMITS: Readonly<{
     maxPlanBytes: number;
     maxStoreBytes: number;
 }>;
+export const CAMP_ARTIFACT_LIMITS: Readonly<{
+    partBytes: number;
+    maxStoreBytes: number;
+    maxManifestBytes: number;
+    roomBytes: number;
+    pendingPerRoom: 2;
+}>;
 /** @typedef {{schemaVersion:1,operationId:string,roomId:string,kind:'backup'|'migration',storageEpoch:number,sourceStorageId:string,acceptedRevision:number,acceptedCandidate:CampCandidate,projectId:string,candidates:CampCandidate[],backupOperationId?:string}} CampStoragePlan */
 /** @typedef {{schemaVersion:1,operationId:string,manifestDigest:string,storeSha256:string,bytes:number,toolchainDigest:string,imageId:string,candidateCount:number,sourceStorageId:string,stopped:true,verified:true}} CampStorageBackupReceipt */
 /** @typedef {CampStorageBackupReceipt & {targetStorageId:string,verifiedCandidates:number,historyVerified:true}} CampStorageRestoreReceipt */
@@ -175,6 +194,8 @@ export class CampProtocolError extends Error {
 /** @param {unknown} value @returns {CampVerificationReport} */
 export function parseVerificationReceipt(value: unknown): CampVerificationReport;
 export const CAMP_PLAN_ITEM_SCHEMA: Record<string, any>;
+export const CAMP_DAG_PLAN_ITEM_SCHEMA: Record<string, any>;
+export const CAMP_DAG_PLAN_TOOL_SCHEMA: Record<string, any>;
 /** These schemas are model-facing: no worker credentials, model selection or
  * arbitrary role/identity provisioning fields belong here. */
 export const CAMP_TOOL_SCHEMAS: Readonly<{
@@ -191,6 +212,27 @@ export const CAMP_TOOL_SCHEMAS: Readonly<{
     camp_finalize: Record<string, any>;
     camp_review: Record<string, any>;
 }>;
+export type CampPrivateArtifactManifest = {
+    schemaVersion: 1;
+    format: "camp-native-store-v1";
+    files: {
+        name: "manifest.json" | "project.record" | "store.sqlite";
+        bytes: number;
+        sha256: string;
+        parts: {
+            bytes: number;
+            sha256: string;
+        }[];
+    }[];
+};
+export type CampPrivateArtifact = {
+    schemaVersion: 1;
+    id: string;
+    state: "uploading" | "ready";
+    manifestDigest: string;
+    manifest: CampPrivateArtifactManifest;
+    received: number[];
+};
 export type CampStoragePlan = {
     schemaVersion: 1;
     operationId: string;
@@ -304,10 +346,26 @@ export type CampPlanItem = {
     acceptance: string;
     verification: string;
 };
+export type CampDagPlanItem = CampPlanItem & {
+    dependsOnKeys: string[];
+};
+export type CampPlanSubmission = {
+    planRevision: 1;
+    summary: string;
+    tasks: CampPlanItem[];
+} | {
+    planRevision: 2;
+    summary: string;
+    tasks: CampDagPlanItem[];
+};
 export type CampPlan = {
     revision: 1;
     summary: string;
     tasks: CampPlanItem[];
+} | {
+    revision: 2;
+    summary: string;
+    tasks: CampDagPlanItem[];
 };
 export type CampFinalSummary = {
     summary: string;
@@ -381,7 +439,7 @@ export type CampResultManifest = {
     integration?: {
         input: CampIntegrationInput;
         receipt: CampIntegrationReceipt | null;
-    } | null;
+    } | CampDagIntegrationEvidence | null;
 };
 export type CampWorkerDeclaration = {
     protocolVersions: number[];
@@ -468,6 +526,7 @@ export type CampVerificationReceipt = CampVerificationReport & {
     operationId: string;
     verifiedAt: string;
 };
+export type CampIntegrationAlgorithm = "layerfs-three-way-v1" | "layerfs-three-way-v2";
 export type CampIntegrationParent = {
     key: string;
     runId: string;
@@ -476,7 +535,7 @@ export type CampIntegrationParent = {
 };
 export type CampIntegrationInput = {
     schemaVersion: 1;
-    algorithm: "layerfs-three-way-v1";
+    algorithm: CampIntegrationAlgorithm;
     policy: "reject-overlap-v1";
     base: CampCandidate;
     parents: [CampIntegrationParent, CampIntegrationParent];
@@ -488,7 +547,7 @@ export type CampIntegrationConflict = {
 export type CampIntegrationReport = {
     schemaVersion: 1;
     inputDigest: string;
-    algorithm: "layerfs-three-way-v1";
+    algorithm: CampIntegrationAlgorithm;
     policy: "reject-overlap-v1";
     status: "merged" | "conflict" | "rejected";
     candidate: CampCandidate | null;
@@ -499,6 +558,27 @@ export type CampIntegrationReceipt = CampIntegrationReport & {
     runId: string;
     operationId: string;
     integratedAt: string;
+};
+export type CampDagInputResolution = "baseline" | "single_parent" | "same_ref" | "ancestor" | "integration";
+export type CampDagDelivery = {
+    status: "waiting_nodes" | "waiting_integration" | "ready" | "blocked";
+    candidate: CampCandidate | null;
+    sourceRunId: string | null;
+    operationId: string | null;
+    inputSources: CampIntegrationParent[];
+    inputResolution: CampDagInputResolution | null;
+};
+export type CampDagIntegrationEvidence = {
+    delivery: CampDagDelivery;
+    operations: {
+        id: string;
+        scope: "goal" | "node_input";
+        planItemKey: string | null;
+        status: CampOperationStatus;
+        integrationInput: CampIntegrationInput | null;
+        inputDigest: string | null;
+        integrationReport: CampIntegrationReceipt | null;
+    }[];
 };
 export type CampOperationStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "blocked";
 export type CampChangeSide = {

@@ -1,4 +1,4 @@
-import { CampProtocolError, parseCandidate, parseChangeSet, parseIntegrationReport, parsePlanItem, parseVerificationReport, serverProtocol } from "../../../camp-protocol/src/index.js";
+import { CampProtocolError, parseCandidate, parseChangeSet, parseIntegrationReport, parseVerificationReport, serverProtocol } from "../../../camp-protocol/src/index.js";
 import { Router, type Router as RouterType, type Request, type Response, type NextFunction } from "express";
 import type { Server as SocketServer } from "socket.io";
 import { z } from "zod";
@@ -19,6 +19,7 @@ import { goalResultManifest } from "../services/camp/presentation";
 import { CAMP_ROLES, CampError, type CampPrincipal } from "../services/camp/types";
 import { CAMP_ARTIFACTS_MAX_BYTES } from "./campRequestLimits";
 import { recordWorkerPreflight, updateProject, workerSetup } from "../services/camp/setup";
+import { campArtifactWorkerRouter } from "./camp.artifacts";
 
 export const campRouter: RouterType = Router();
 export const campWorkerRouter: RouterType = Router();
@@ -36,12 +37,11 @@ const roomInput = z.object({
   roles: z.array(z.object({ role, agentId: id.optional(), instructions: z.string().max(16000).optional() })).length(3).optional(),
 });
 const budgetInput = z.object({ maxRuns: z.number().int().min(1).max(100).optional(), maxReviewRounds: z.number().int().min(1).max(20).optional(), maxDurationSeconds: z.number().int().min(1).max(86400).optional() });
-const pipelineInput = z.object({ title: z.string().trim().min(1).max(500), description: z.string().max(16000).optional(), role: role.optional(), dependsOn: z.array(id).max(100).optional(), budget: budgetInput.optional(), workflow: z.enum(["serial", "legacy"]).optional(), fromGoalId: id.optional(), planMode: z.enum(["sequential", "same_baseline_pair", "parallel_pair"]).optional() }).strict();
+const pipelineInput = z.object({ title: z.string().trim().min(1).max(500), description: z.string().max(16000).optional(), role: role.optional(), dependsOn: z.array(id).max(100).optional(), budget: budgetInput.optional(), workflow: z.enum(["serial", "legacy"]).optional(), fromGoalId: id.optional(), planMode: z.enum(["sequential", "same_baseline_pair", "parallel_pair", "bounded_dag"]).optional() }).strict();
 const leaseInput = z.object({ workerId: z.string().trim().min(1).max(200), epoch: z.number().int().positive() });
 const pluginIdentity = { epoch: leaseInput.shape.epoch, workerId: leaseInput.shape.workerId.optional(), runId: id.optional() };
 const eventInput = z.object({ workerId: z.string().max(200).optional(), epoch: z.number().int().positive(), type: z.enum(["progress", "artifact", "question", "handoff"]), content: text, artifact: artifact.optional(), toRole: role.optional() });
 const completionInput = leaseInput.extend({ status: z.enum(["completed", "failed", "cancelled", "suspended"]), summary: text, artifacts: artifactList.optional(), sessionId: z.string().max(1024).optional(), error: z.string().max(16000).optional(), outcome: z.enum(["approved", "changes_requested", "handoff"]).optional(), inputCandidate: runtimeCandidate.optional(), candidate: runtimeCandidate.optional(), questionId: id.optional(), changeSet: z.unknown().transform(value => parseChangeSet(value)).optional(), verification: z.unknown().transform(value => parseVerificationReport(value)).optional(), integration: z.unknown().transform(value => parseIntegrationReport(value)).optional() });
-const planItemInput = z.unknown().transform(value => parsePlanItem(value));
 const principal = (res: Response): CampPrincipal => res.locals.campPrincipal;
 
 function endpoint(handler: (req: Request, res: Response) => Promise<void>) {
@@ -202,6 +202,7 @@ export function authenticateCampRequest(req: Request, res: Response, next: NextF
   });
 }
 campWorkerRouter.use(authenticateCampRequest);
+campWorkerRouter.use(campArtifactWorkerRouter);
 campWorkerRouter.get("/protocol", endpoint(async (_req, res) => {
   runs.requireWorker(principal(res));
   res.json(serverProtocol());
@@ -269,7 +270,7 @@ campWorkerRouter.get("/goals/:goalId/result", endpoint(async (req, res) => {
   res.json(await goalResultManifest(principal(res).roomId, id.parse(req.params.goalId)));
 }));
 campWorkerRouter.post("/runs/:runId/plan", endpoint(async (req, res) => {
-  const body = z.object({ ...pluginIdentity, planRevision: z.literal(1), summary: text, tasks: z.array(planItemInput).min(1).max(5) }).strict().parse(req.body);
+  const body = z.object({ ...pluginIdentity, planRevision: z.union([z.literal(1), z.literal(2)]), summary: text, tasks: z.array(z.unknown()).min(1).max(6) }).strict().parse(req.body);
   const effect = await plans.submitPlan(principal(res), id.parse(req.params.runId), body);
   if (!effect.replayed) await emitState(req, effect.room.id);
   res.json({ plan: effect.plan, replayed: effect.replayed });

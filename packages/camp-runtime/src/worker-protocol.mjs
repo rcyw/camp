@@ -1,10 +1,12 @@
 import { resolve } from 'node:path';
 import { open } from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   CAMP_AGENT_TASK_KINDS, CAMP_TASK_KINDS, CAMP_CAPABILITIES_V1, CAMP_CAPABILITIES_V2,
   createWorkerDeclaration, parseWorkerDeclaration, parseServerProtocol,
   getTaskRequirements, getPluginTaskRequirements, checkWorkerCompatibility, parseExecutionPool,
+  CAMP_INTEGRATION_ALGORITHM, CAMP_DAG_INTEGRATION_ALGORITHM,
 } from '../../camp-protocol/src/index.js';
 import { loadVerificationHarnesses } from './verification.mjs';
 
@@ -28,25 +30,48 @@ export function checkedServerCapabilities(value, declaration = createWorkerDecla
   }
   return server;
 }
+/** Static descriptor only: capability discovery never imports plugin code into
+ * the trusted host. This is the same directory installPlugin later packages. */
+export async function readPluginDeclaration(pluginPath = fileURLToPath(new URL('../../dsh-plugin', import.meta.url))) {
+  try {
+    const file = await open(resolve(pluginPath, 'protocol.json'), constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+    try {
+      const stat = await file.stat();
+      if (!stat.isFile() || stat.size > 65536) throw new Error('Invalid descriptor file');
+      return parseWorkerDeclaration(JSON.parse(await file.readFile('utf8')));
+    } finally { await file.close(); }
+  } catch { throw protocolFailure('Selected DSH plugin lacks a valid static protocol declaration', 'plugin_protocol_required'); }
+}
+function modelPluginVersions(plugin, versions) {
+  const supported = versions.filter(version => CAMP_AGENT_TASK_KINDS.every(taskKind => checkWorkerCompatibility(plugin, getPluginTaskRequirements(getTaskRequirements({ protocolVersion: version, workflow: 'serial', taskKind, inputCandidate: null }))).status === 'compatible'));
+  if (!supported.length) {
+    const base = CAMP_AGENT_TASK_KINDS.map(taskKind => checkWorkerCompatibility(plugin, getPluginTaskRequirements(getTaskRequirements({ protocolVersion: 1, workflow: 'serial', taskKind, inputCandidate: null }))));
+    throw protocolFailure('Selected DSH plugin cannot safely execute the model task contract', base.find(result => result.code === 'capability_missing')?.code ?? 'protocol_unsupported');
+  }
+  return supported;
+}
 /** The same selected declaration is used by doctor and actual allocation. */
-export function selectWorkerDeclaration(server, { hasModel = true, harnesses = [], executionPool } = {}) {
+export function selectWorkerDeclaration(server, { hasModel = true, harnesses = [], executionPool, plugin } = {}) {
   let protocol = createWorkerDeclaration();
   // A serial process cannot accidentally offer a protocol that requires a
   // coordinated recovery barrier and two bounded execution lanes.
-  protocol.protocolVersions = protocol.protocolVersions.filter(version => version <= (executionPool ? 4 : 3));
-  protocol.capabilities = protocol.capabilities.filter(capability => capability !== 'bounded-pair.v1');
+  protocol.protocolVersions = protocol.protocolVersions.filter(version => version <= (executionPool ? 5 : 3));
+  if (hasModel && plugin) protocol.protocolVersions = modelPluginVersions(parseWorkerDeclaration(plugin), protocol.protocolVersions);
+  protocol.capabilities = protocol.capabilities.filter(capability => !['bounded-pair.v1', 'bounded-dag.v1', 'structured-plan.v2'].includes(capability));
   if (executionPool) {
     protocol.executionPool = parseExecutionPool(executionPool);
     protocol.capabilities.push('bounded-pair.v1');
-    if (!server.supportedProtocolVersions.includes(4)) throw protocolFailure('The server does not support bounded pool execution');
+    if (!server.supportedProtocolVersions.some(version => version === 4 || version === 5)) throw protocolFailure('The server does not support bounded pool execution');
   }
   const version = Math.max(...server.supportedProtocolVersions.filter(item => protocol.protocolVersions.includes(item)));
   if (!Number.isFinite(version) || (!hasModel && version < 2)) throw protocolFailure('No supported execution protocol is available for this worker');
+  if (executionPool && version < 4) throw protocolFailure('Selected DSH plugin does not support bounded pool execution');
+  if (version >= 5) protocol.capabilities.push('structured-plan.v2', 'bounded-dag.v1');
   if (version === 1) protocol = { ...protocol, protocolVersions: [1], taskKinds: [...CAMP_AGENT_TASK_KINDS], capabilities: [...CAMP_CAPABILITIES_V1] };
-  else if (version === 2) protocol = { ...protocol, protocolVersions: [1, 2], taskKinds: protocol.taskKinds.filter(kind => kind !== 'integration'), capabilities: [...CAMP_CAPABILITIES_V2] };
+  else if (version === 2) protocol = { ...protocol, protocolVersions: protocol.protocolVersions.filter(item => item <= 2), taskKinds: protocol.taskKinds.filter(kind => kind !== 'integration'), capabilities: [...CAMP_CAPABILITIES_V2] };
   if (!hasModel) {
     protocol.taskKinds = version >= 3 ? ['verification', 'integration'] : ['verification'];
-    protocol.capabilities = ['layerfs.candidate.v1', 'candidate-diff.v1', 'trusted-verification.v1', ...(version >= 3 ? ['trusted-integration.v1'] : []), ...(executionPool ? ['bounded-pair.v1'] : [])];
+    protocol.capabilities = ['layerfs.candidate.v1', 'candidate-diff.v1', 'trusted-verification.v1', ...(version >= 3 ? ['trusted-integration.v1'] : []), ...(executionPool ? ['bounded-pair.v1'] : []), ...(version >= 5 ? ['bounded-dag.v1'] : [])];
   }
   if (version >= 2 && harnesses.length) protocol.harnesses = harnesses.map(({ id, sha256 }) => ({ id, sha256 }));
   return { protocol, version };
@@ -56,22 +81,9 @@ export async function negotiateWorker({ request, pluginPath, env = process.env, 
     const server = parseServerProtocol(await request('/protocol'));
     const harnesses = await loadVerificationHarnesses(env);
     const hasModel = Boolean(env.DEEPSEEK_API_KEY);
-    const { protocol, version } = selectWorkerDeclaration(server, { hasModel, harnesses, executionPool });
+    const plugin = hasModel ? await readPluginDeclaration(pluginPath) : null;
+    const { protocol } = selectWorkerDeclaration(server, { hasModel, harnesses, executionPool, plugin });
     checkedServerCapabilities(server, protocol);
-    if (!hasModel) return { server, protocol, harnesses };
-    let plugin;
-    try {
-      const file = await open(resolve(pluginPath, 'protocol.json'), constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
-      try {
-        const stat = await file.stat();
-        if (!stat.isFile() || stat.size > 65536) throw new Error('Invalid descriptor file');
-        plugin = parseWorkerDeclaration(JSON.parse(await file.readFile('utf8')));
-      } finally { await file.close(); }
-    } catch { throw protocolFailure('Selected DSH plugin lacks a valid static protocol declaration', 'plugin_protocol_required'); }
-    for (const taskKind of CAMP_AGENT_TASK_KINDS) {
-      const result = checkWorkerCompatibility(plugin, getPluginTaskRequirements(getTaskRequirements({ protocolVersion: version, workflow: 'serial', taskKind, inputCandidate: null })));
-      if (result.status !== 'compatible') throw protocolFailure(`Selected DSH plugin does not support ${taskKind} (${result.code})`, result.code);
-    }
     return { server, protocol, harnesses };
   } catch (error) {
     if (error.code === 'camp_api_transport' || error.status >= 500 || [408, 429].includes(error.status)) throw error;
@@ -83,6 +95,7 @@ export function assertClaimCompatibility(value, claim, declaration) {
   if (!compatibility || compatibility.status !== 'compatible' || compatibility.code !== 'compatible' || !declaration.protocolVersions.includes(compatibility.protocolVersion) || ['missingTaskKinds', 'missingRefKinds', 'missingCapabilities', ...(compatibility.protocolVersion >= 2 ? ['missingHarnesses'] : [])].some(key => !Array.isArray(compatibility[key]) || compatibility[key].length)) throw protocolFailure(`Camp did not confirm a compatible claim (${compatibility?.code ?? 'missing_compatibility'})`, compatibility?.code ?? 'protocol_required');
   const negotiated = claim.workerProtocol;
   if (!negotiated || negotiated.version !== compatibility.protocolVersion || claim.protocolVersion !== negotiated.version) throw protocolFailure('Claim lacks a supported original negotiated protocol snapshot', 'protocol_required');
+  if (claim.executor === 'integration' && claim.integrationInput?.algorithm !== (negotiated.version >= 5 ? CAMP_DAG_INTEGRATION_ALGORITHM : CAMP_INTEGRATION_ALGORITHM)) throw protocolFailure('Claim changed its negotiated integration algorithm', 'protocol_unsupported');
   const original = parseWorkerDeclaration(negotiated.declaration);
   const requirements = getTaskRequirements({ protocolVersion: compatibility.protocolVersion, workflow: claim.workflow, taskKind: claim.taskKind, inputCandidate: claim.inputCandidate, verificationPolicy: claim.verificationPolicy });
   const recorded = negotiated.requirements;
