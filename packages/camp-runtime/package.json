@@ -11,6 +11,8 @@
     "worker": "node --import @oxc-node/core/register src/worker.mjs",
     "worker:pool": "node --import @oxc-node/core/register scripts/worker-pool.mjs",
     "build:bundle": "node scripts/build-bundle.mjs",
+    "build:release": "node scripts/build-worker-release.mjs",
+    "verify:release": "node scripts/verify-worker-release.mjs",
     "build:dsh": "node scripts/pack-dsh.mjs --install",
     "doctor": "node scripts/doctor.mjs"
   }

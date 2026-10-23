@@ -17,6 +17,7 @@ import { resourcePolicy, storageCapacity } from './resource-policy.mjs';
 import { runTrustedIntegration } from './integration.mjs';
 import { integrationCompletion } from './integration-completion.mjs';
 import { acquireHostManager, assertNoManagedContainers } from './host-manager.mjs';
+import { loadDshRuntimeSession } from './dsh-session-loader.mjs';
 
 const transient = error => !['camp_journal_io', 'camp_journal_invalid'].includes(error.code) && (!error.status || error.status >= 500 || [408, 429].includes(error.status));
 export async function startWorker(options = {}) {
@@ -207,7 +208,7 @@ export async function startWorker(options = {}) {
           CAMP_PROTOCOL_VERSION: String(claim.protocolVersion ?? 1),
           DSH_PERMISSION_MODE: 'danger-full-access',
         } });
-        createSession ??= (await import('../../daemon/src/drivers/dshAcp.ts')).createDshRuntimeSession;
+        createSession ??= await loadDshRuntimeSession();
         session = createSession({ ...launch, cwd: run.workspacePath, processCwd: process.cwd(), model: env.CAMP_DSH_MODEL ?? 'profile', approvePermissions: true, signal: controller.signal, handshakeTimeoutMs: 30_000 });
         const settled = new Promise((resolveTurn, reject) => {
           finishTurn = resolveTurn;
