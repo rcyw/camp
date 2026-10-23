@@ -409,7 +409,7 @@ async function bootstrap() {
 
   // Start server
   trackHttpServer(server);
-  server.listen(PORT, () => {
+  server.listen(PORT, process.env.CAMP_LISTEN_HOST || "::", () => {
     slackBridge?.start();
     console.log(`[Slock] Server listening on http://localhost:${PORT}`);
     serverTracer.tracer.emitEvent("slock.server.started", { surface: "server" });

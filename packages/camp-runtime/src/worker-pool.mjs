@@ -5,12 +5,13 @@ import { startWorker } from './worker.mjs';
 import { CampRuntime } from './index.mjs';
 import { WorkerJournal, acquireWorkerLock } from './durable-state.mjs';
 import { recoverWorker, restoreWorkerForClaims } from './worker-recovery.mjs';
-import { workerApiUrl, workerApiRequest, workerIdForEnvironment } from './worker-preflight.mjs';
+import { workerApiUrl, workerIdForEnvironment } from './worker-preflight.mjs';
 import { resourcePolicy } from './resource-policy.mjs';
 import { acquireHostManager, admitPoolHost, attemptContainers, PoolAdmission, poolResources, managerFailure } from './host-manager.mjs';
 import { openPoolState, loadPoolState, assertPoolConfiguration, checkPoolJournals } from './pool-state.mjs';
 import { parseExecutionPool } from '../../camp-protocol/src/index.js';
 import { openStorageIdentity } from './storage-identity.mjs';
+import { managedWorkerCredential } from './worker-credentials.mjs';
 
 function barrier(count) {
   let arrived = 0, resolveReady, rejectReady;
@@ -21,12 +22,13 @@ function barrier(count) {
 /** Bounded local manager, not another agent scheduler. Each lane preserves the
  * serial worker's fencing, exact outbox and physical cleanup responsibilities. */
 export async function startWorkerPool(options = {}) {
-  const env = options.env ?? process.env;
+  const credential = await managedWorkerCredential({ env: options.env ?? process.env, request: options.request });
+  const env = credential.env;
   const apiUrl = workerApiUrl(env), baseWorkerId = workerIdForEnvironment(env);
   if (!env.CAMP_WORKER_TOKEN) throw managerFailure('A Room worker credential is required', 'camp_auth_required');
   const log = options.log ?? (entry => console.log(JSON.stringify(entry)));
   const runtime = options.runtime ?? new CampRuntime({ env });
-  const request = options.request ?? workerApiRequest(env);
+  const request = credential.request;
   const signals = options.signalSource ?? process, laneSignals = new EventEmitter();
   const ready = barrier(2), idle = new Set();
   let stopped = false, fatal, manager, baseLock, admission;

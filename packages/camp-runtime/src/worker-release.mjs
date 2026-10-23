@@ -10,10 +10,10 @@ const runtimeFiles = [
   'host-manager', 'index', 'integration-ancestry', 'integration-completion', 'integration-tree',
   'integration', 'local-doctor', 'model-proxy', 'native-store', 'plugin-package', 'pool-state',
   'private-artifacts', 'project-lock', 'quiesce-agent', 'resource-policy', 'restore-binding',
-  'run-limits', 'run-policy', 'safe-export', 'sdk-call', 'session-archive', 'snapshot-stream',
+  'run-limits', 'run-policy', 'safe-export', 'sandbox-trust', 'sdk-call', 'session-archive', 'snapshot-stream',
   'source-snapshot', 'storage-identity', 'store-sqlite', 'toolchain', 'verification', 'worker-core',
   'worker-ops', 'worker-pool', 'worker-preflight', 'worker-protocol', 'worker-recovery', 'worker',
-  'worker-release',
+  'worker-release', 'worker-credentials',
 ].map(name => `packages/camp-runtime/src/${name}.mjs`);
 export const WORKER_RELEASE_FILES = Object.freeze([
   'LICENSE', 'packages/camp-runtime/package.json', 'packages/camp-runtime/toolchain.lock.json',

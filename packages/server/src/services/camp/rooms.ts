@@ -18,6 +18,7 @@ import { operationSnapshots } from "./verification";
 import { workerSnapshots } from "./workerCompatibility";
 import { assertRoomAdmission } from "./workflow";
 import { roomSetup } from "./setup";
+import { WORKER_CREDENTIAL_LEASE_MS, workerCredentialMetadata } from "./workerCredentialPolicy";
 
 export const hashCampToken = (token: string) => createHash("sha256").update(token).digest("hex");
 export const newCampToken = (kind: "worker" | "run") => `camp_${kind}_${randomBytes(32).toString("base64url")}`;
@@ -193,9 +194,8 @@ export async function roomSnapshot(roomId: string, userId?: string) {
 export async function mintWorkerToken(roomId: string, userId: string) {
   return withCampRoomAdmin(roomId, userId, async tx => {
     const token = newCampToken("worker");
-    const expiresAt = new Date(Date.now() + 7 * 86400_000);
-    const [row] = await tx.insert(campWorkerTokens).values({ roomId, tokenHash: hashCampToken(token), expiresAt }).returning({ id: campWorkerTokens.id });
-    return { token, tokenId: row.id, roomId, expiresAt: expiresAt.toISOString() };
+    const [row] = await tx.insert(campWorkerTokens).values({ roomId, tokenHash: hashCampToken(token), expiresAt: sql`clock_timestamp() + ${WORKER_CREDENTIAL_LEASE_MS} * interval '1 millisecond'` }).returning();
+    return { token, ...workerCredentialMetadata(row) };
   });
 }
 

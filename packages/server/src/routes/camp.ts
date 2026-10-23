@@ -20,6 +20,7 @@ import { CAMP_ROLES, CampError, type CampPrincipal } from "../services/camp/type
 import { CAMP_ARTIFACTS_MAX_BYTES } from "./campRequestLimits";
 import { recordWorkerPreflight, updateProject, workerSetup } from "../services/camp/setup";
 import { campArtifactWorkerRouter } from "./camp.artifacts";
+import { renewWorkerCredential } from "../services/camp/workerCredentials";
 
 export const campRouter: RouterType = Router();
 export const campWorkerRouter: RouterType = Router();
@@ -203,6 +204,10 @@ export function authenticateCampRequest(req: Request, res: Response, next: NextF
 }
 campWorkerRouter.use(authenticateCampRequest);
 campWorkerRouter.use(campArtifactWorkerRouter);
+campWorkerRouter.post("/credential/renew", endpoint(async (req, res) => {
+  z.object({}).strict().parse(req.body);
+  res.json(await renewWorkerCredential(principal(res)));
+}));
 campWorkerRouter.get("/protocol", endpoint(async (_req, res) => {
   runs.requireWorker(principal(res));
   res.json(serverProtocol());

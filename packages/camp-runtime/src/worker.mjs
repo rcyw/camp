@@ -18,6 +18,7 @@ import { runTrustedIntegration } from './integration.mjs';
 import { integrationCompletion } from './integration-completion.mjs';
 import { acquireHostManager, assertNoManagedContainers } from './host-manager.mjs';
 import { loadDshRuntimeSession } from './dsh-session-loader.mjs';
+import { installSandboxTrust } from './sandbox-trust.mjs';
 
 const transient = error => !['camp_journal_io', 'camp_journal_invalid'].includes(error.code) && (!error.status || error.status >= 500 || [408, 429].includes(error.status));
 export async function startWorker(options = {}) {
@@ -194,6 +195,7 @@ export async function startWorker(options = {}) {
         controller.signal.throwIfAborted();
         await runtime.installDsh(run);
         await runtime.installPlugin(run, pluginPath);
+        const trust = await installSandboxTrust({ runtime, run, caFile: env.CAMP_CONTROL_CA_FILE });
         const sandboxApi = await runtime.sandboxApiUrl(run, apiUrl);
         modelProxy = await createModelProxy({
           apiKey: env.DEEPSEEK_API_KEY, baseUrl: env.DEEPSEEK_BASE_URL, host: await runtime.sandboxHostAddress(run),
@@ -202,6 +204,7 @@ export async function startWorker(options = {}) {
           onLimit: error => controller.abort(error),
         });
         const launch = runtime.launchSpec(run, { env: {
+          ...trust,
           DEEPSEEK_API_KEY: modelProxy.token, DEEPSEEK_BASE_URL: modelProxy.baseUrl,
           CAMP_API_URL: sandboxApi, CAMP_ROOM_ID: claim.roomId, CAMP_RUN_ID: claim.id,
           CAMP_RUN_EPOCH: String(claim.epoch), CAMP_WORKER_ID: workerId, CAMP_RUN_TOKEN: claim.runToken,
