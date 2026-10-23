@@ -1,6 +1,6 @@
 import { CampRuntime } from '../src/index.mjs';
 import { exportNativeStore, restoreNativeStore, reportNativeStore } from '../src/native-store.mjs';
-import { workerApiRequest } from '../src/worker-preflight.mjs';
+import { managedWorkerCredential } from '../src/worker-credentials.mjs';
 import { parseStoragePlan, parseStorageBackupReceipt, parseStorageRestoreReceipt } from '../../camp-protocol/src/index.js';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
@@ -21,7 +21,8 @@ export function checkStorageCommand(command, operation, plan) {
 export async function storageMain(args = process.argv.slice(2), env = process.env) {
   if (args.length !== 3 || !['backup', 'restore', 'report-backup'].includes(args[0]) || args[1] !== '--operation' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(args[2])) throw Object.assign(new Error('Usage: storage.mjs backup|restore|report-backup --operation <UUID>'), { code: 'camp_storage_usage' });
   if (!env.CAMP_STORAGE_BUNDLE) throw Object.assign(new Error('CAMP_STORAGE_BUNDLE must select a private local bundle directory'), { code: 'camp_storage_configuration' });
-  const request = workerApiRequest(env), operationId = args[2];
+  const credential = await managedWorkerCredential({ env });
+  const request = credential.request, operationId = args[2];
   const context = await request(`/storage-operations/${operationId}`), plan = parseStoragePlan(context.plan);
   if (plan.operationId !== operationId) throw Object.assign(new Error('Storage operation identity differs'), { code: 'camp_storage_identity' });
   const admission = checkStorageCommand(args[0], context.operation, plan);

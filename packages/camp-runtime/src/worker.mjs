@@ -19,6 +19,7 @@ import { integrationCompletion } from './integration-completion.mjs';
 import { acquireHostManager, assertNoManagedContainers } from './host-manager.mjs';
 import { loadDshRuntimeSession } from './dsh-session-loader.mjs';
 import { installSandboxTrust } from './sandbox-trust.mjs';
+import { managedWorkerCredential } from './worker-credentials.mjs';
 
 const transient = error => !['camp_journal_io', 'camp_journal_invalid'].includes(error.code) && (!error.status || error.status >= 500 || [408, 429].includes(error.status));
 export async function startWorker(options = {}) {
@@ -399,5 +400,5 @@ export async function startWorker(options = {}) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  await startWorker().catch(error => { console.error(JSON.stringify({ event: 'worker_stopped', reason: error.message })); process.exitCode = 1; });
+  await managedWorkerCredential().then(credential => startWorker({ env: credential.env, request: credential.request })).catch(error => { console.error(JSON.stringify({ event: 'worker_stopped', reason: error.message })); process.exitCode = 1; });
 }

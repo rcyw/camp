@@ -7,6 +7,7 @@ import { CampRuntime } from './index.mjs';
 import { checkedCandidate, checkedManifest } from './candidate.mjs';
 import { receiveSnapshot, removeOwnedDirectory } from './safe-export.mjs';
 import { acquireProjectLock } from './project-lock.mjs';
+import { managedWorkerCredential } from './worker-credentials.mjs';
 
 const inside = (parent, child) => { const path = relative(parent, child); return path === '' || (!path.startsWith('../') && path !== '..'); };
 function finished(child) {
@@ -105,8 +106,13 @@ async function performExport({ runtime, candidate, roomId, goalId, output, archi
   }
 }
 
-export async function fetchGoalManifest({ apiUrl, token, goalId }) {
+export async function fetchGoalManifest({ apiUrl, token, goalId, request }) {
   if (!/^[a-f0-9-]{36}$/.test(goalId ?? '')) throw new Error('Invalid goal ID');
+  if (request) {
+    const manifest = checkedManifest(await request(`/goals/${goalId}/result`));
+    if (manifest.goalId !== goalId) throw new Error('Manifest goal identity differs from the requested goal');
+    return manifest;
+  }
   if (!token) throw new Error('CAMP_WORKER_TOKEN is required for goal manifest access');
   const url = new URL(`${apiUrl.replace(/\/$/, '')}/api/camp/worker/goals/${goalId}/result`);
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Invalid Camp API URL');
@@ -128,13 +134,16 @@ export async function exportMain(args = process.argv.slice(2), env = process.env
   if (Number(values.has('--out')) + Number(values.has('--archive')) !== 1 || Number(values.has('--manifest')) + Number(values.has('--goal')) + Number(values.has('--project')) !== 1) throw new Error('Select exactly one input and one new export destination');
   let manifest;
   if (values.has('--manifest')) manifest = checkedManifest(JSON.parse(await readFile(resolve(values.get('--manifest')), 'utf8')));
-  if (values.has('--goal')) manifest = await fetchGoalManifest({ apiUrl: env.CAMP_API_URL ?? 'http://127.0.0.1:3001', token: env.CAMP_WORKER_TOKEN, goalId: values.get('--goal') });
+  if (values.has('--goal')) {
+    const credential = await managedWorkerCredential({ env });
+    manifest = await fetchGoalManifest({ request: credential.request, goalId: values.get('--goal') });
+  }
   if (manifest && ['--commit', '--layer', '--ref', '--ref-kind', '--root', '--image'].some(key => values.has(key))) throw new Error('A manifest candidate cannot be overridden with local candidate fields');
   if (!manifest && Number(values.has('--commit')) + Number(values.has('--layer')) + Number(values.has('--ref')) !== 1) throw new Error('Select exactly one immutable Commit or Layer reference');
   if (!manifest && values.has('--ref-kind') && !values.has('--ref')) throw new Error('--ref-kind is only valid with --ref');
   const reference = values.has('--commit') ? { commitId: values.get('--commit') } : values.has('--layer') ? { refKind: 'layer', refId: values.get('--layer'), layerId: values.get('--layer') } : { refKind: values.get('--ref-kind'), refId: values.get('--ref') };
   const candidate = manifest?.candidate ?? { type: 'layerfs', projectId: values.get('--project'), ...reference, rootId: values.get('--root'), ...(values.has('--image') ? { imageId: values.get('--image') } : {}) };
-  const runtime = await new CampRuntime().ready();
+  const runtime = await new CampRuntime({ env }).ready();
   return exportCandidate({ runtime, candidate, roomId: manifest?.roomId, goalId: manifest?.goalId, output: values.get('--out') ?? values.get('--archive'), archive: values.has('--archive') });
 }
 
