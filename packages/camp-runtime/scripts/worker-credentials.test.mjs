@@ -64,6 +64,18 @@ test('a lost renewal response retries the identical secret even when persisted e
   } finally { await f.close(); }
 });
 
+test('a fresh lease verifies the actual bearer Room before recovery instead of trusting editable JSON metadata', async () => {
+  const f = await fixture(0); let ordinary = 0;
+  try {
+    const managed = await managedWorkerCredential({ env: { ...f.env, CAMP_WORKER_ROOM_ID: f.value.roomId }, request: async route => {
+      if (route === '/credential/renew') return { ...f.value, roomId: randomUUID() };
+      ordinary++; return {};
+    } });
+    await assert.rejects(managed.request('/claim', {}), { code: 'camp_credential_invalid', status: 409 });
+    assert.equal(ordinary, 0, 'Pasting a foreign bearer into an otherwise matching Room file cannot rebind the Store');
+  } finally { await f.close(); }
+});
+
 test('revocation, expiry and a disk publication failure admit no ordinary API request', async () => {
   for (const failure of ['revoked', 'expired', 'storage', 'foreign']) {
     const f = await fixture(); let ordinary = 0;

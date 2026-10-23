@@ -48,7 +48,7 @@ export async function managedWorkerCredential({ env = process.env, request, now 
   if (env.CAMP_WORKER_TOKEN) throw fail();
   const url = new URL(workerApiUrl(env));
   if (url.protocol !== 'https:' && !['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname)) throw fail();
-  let credential = await readWorkerCredential(path), renewal;
+  let credential = await readWorkerCredential(path), renewal, authenticated = false;
   if (env.CAMP_WORKER_ROOM_ID !== undefined && (!uuid.test(env.CAMP_WORKER_ROOM_ID) || credential.roomId !== env.CAMP_WORKER_ROOM_ID)) throw fail();
   const selectedEnv = { ...env, CAMP_WORKER_TOKEN: credential.token };
   const api = request ?? workerApiRequest(selectedEnv);
@@ -61,9 +61,13 @@ export async function managedWorkerCredential({ env = process.env, request, now 
     try { await persist(path, updated); }
     catch { throw fail('camp_credential_storage'); }
     credential = updated;
+    authenticated = true;
   };
   return { env: selectedEnv, request: async (route, body) => {
-    if (Date.parse(credential.expiresAt) - now() <= renewalWindowMs) {
+    // The JSON is operator metadata, not proof of the token's Room. Bind it
+    // against an authenticated server response before any recovery or claim,
+    // including when a newly issued local lease still has its full seven days.
+    if (!authenticated || Date.parse(credential.expiresAt) - now() <= renewalWindowMs) {
       renewal ??= renew().finally(() => { renewal = null; });
       await renewal;
     }
