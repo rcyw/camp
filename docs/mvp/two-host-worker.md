@@ -101,6 +101,11 @@ journal identity. Do not run this development tunnel as an unattended permanent
 service. A production service needs a stable authenticated HTTPS control origin,
 an independently provisioned Room credential and an operator-managed service unit.
 
+Alternatively, set `CAMP_REMOTE_MANAGED_TUNNEL=1` for the acceptance controller
+to create, own and finally close the same checked tunnel helper. Do not start the
+separate foreground helper on that port in managed mode. The default remains an
+externally managed tunnel, which the controller never closes or replaces.
+
 ## Run the explicit probe
 
 Stop the source fixture's host manager first. Other unrelated containers remain
@@ -159,14 +164,32 @@ physical chassis without separate infrastructure evidence.
 
 ## Fault and recovery limits
 
-The initial automated interrupted-download case is a **request-hook fault after
+The default automated interrupted-download case is a **request-hook fault after
 a real downloaded part**, followed by the actual private-journal resume. Its
 receipt explicitly says `realNetworkInterrupted: false`; it is not a network
-partition test. For real outage acceptance, stop the separately owned tunnel
-after a persisted part, let the request fail, reconnect at the same port and
-repeat the target download action using the same operation, bundle and home.
-Compare completed part hashes and the unchanged artifact manifest. Do not mint a
-replacement operation to hide a failed transfer.
+partition test. To run an actual network outage case, set both flags:
+
+```sh
+export CAMP_REMOTE_MANAGED_TUNNEL=1
+export CAMP_REMOTE_NETWORK_FAULT=1
+node scripts/mvp/two-host-storage-smoke.mjs --real-infra
+```
+
+Both flags accept only `0` or `1`; a network fault requires managed mode. The
+target confirms the first downloaded part was synced and renamed into its
+private journal, records that part's hash and pauses before requesting the next
+part. A separate SSH control session, with connection multiplexing disabled,
+keeps stdin open. The controller waits for its owned API tunnel to close fully
+before releasing the target gate. The next fetch must produce a real TCP
+connection error; an ordinary exception or HTTP refusal cannot pass this case.
+The target rechecks that the same partial bytes and manifest remain. Only then
+does the controller reopen the tunnel on the same port and resume the same
+operation, destination and artifact. It verifies normal complete hashes during
+assembly and native restoration. It never mints a replacement operation to hide
+a failed transfer. The receipt sets `realNetworkInterrupted: true` only when this
+entire case runs; failed reconnect or unknown tunnel cleanup cannot publish PASS.
+The native bundle's `manifestDigest` remains distinct from the resumed transport's
+`transferManifestDigest`.
 
 Target actions have independent hard deadlines. The pool child has a parent
 death signal, verifies the expected parent and records PID plus Linux start time.
@@ -177,8 +200,8 @@ On SSH failure, keep the private operation and journals; cleanup is unknown unti
 the operator reconnects and verifies the owned process and resources. A lease
 expiry or a stopped SSH client does not prove container cleanup.
 
-Before enabling continuous use, separately exercise a genuine tunnel interruption,
-a target process kill with journal/outbox recovery, and native integration death
+Before enabling continuous use, execute the managed network-fault mode on the
+actual two hosts, a target process kill with journal/outbox recovery, and native integration death
 after durable intent. The last case must remain inspection-required, not merge
 again automatically. An API failure stops an active Worker safely; this procedure
 does not promise uninterrupted execution through a network partition. Preserve

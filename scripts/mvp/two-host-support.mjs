@@ -41,6 +41,102 @@ export async function sshJson(alias, argv, input, { timeoutMs = 240000, spawnPro
     child.stdin.end(input === undefined ? '' : JSON.stringify(input));
   });
 }
+const networkCodes = new Set(['ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT']);
+export function transportFailureCode(error) {
+  if (!(error instanceof TypeError)) return null;
+  const code = error.cause?.code;
+  return networkCodes.has(code) ? code : null;
+}
+function checkedPhase(frame) {
+  const names = ['artifactId', 'manifestDigest', 'partBytes', 'partSha256', 'phase', 'receivedParts', 'schemaVersion', 'totalParts', 'type'];
+  if (!frame || Object.keys(frame).sort().join() !== names.sort().join() || frame.schemaVersion !== 1 || frame.type !== 'phase' || frame.phase !== 'first_part_persisted' || !/^[a-f0-9-]{36}$/.test(frame.artifactId) || !/^[a-f0-9]{64}$/.test(frame.manifestDigest) || !/^[a-f0-9]{64}$/.test(frame.partSha256) || frame.receivedParts !== 1 || !Number.isSafeInteger(frame.totalParts) || frame.totalParts < 2 || frame.totalParts > 100000 || !Number.isSafeInteger(frame.partBytes) || frame.partBytes < 1 || frame.partBytes > 8 * 1024 ** 2) throw new Error('Invalid bounded network-fault phase');
+  return frame;
+}
+function checkedNetworkResult(frame, phase) {
+  const names = ['artifactId', 'partialRetained', 'partSha256', 'realNetworkInterrupted', 'requestHookInterrupted', 'transferManifestDigest', 'transportCode'];
+  const result = frame?.result;
+  if (!frame || Object.keys(frame).sort().join() !== 'result,schemaVersion,type' || frame.schemaVersion !== 1 || frame.type !== 'result' || !result || Object.keys(result).sort().join() !== names.sort().join() || result.realNetworkInterrupted !== true || result.requestHookInterrupted !== false || result.partialRetained !== true || !networkCodes.has(result.transportCode) || result.artifactId !== phase.artifactId || result.transferManifestDigest !== phase.manifestDigest || result.partSha256 !== phase.partSha256) throw new Error('Invalid bounded network-fault result');
+  return result;
+}
+/** A second, non-multiplexed SSH session stays alive while the API forwarding
+ * connection is deliberately closed. Its stdin is a one-command gate. */
+export async function sshGatedJson(alias, argv, { onPhase, timeoutMs = 240000, stopMs = 5000, spawnProcess = spawn, signal } = {}) {
+  if (typeof onPhase !== 'function') throw new Error('A network-fault phase handler is required');
+  signal?.throwIfAborted();
+  return new Promise((resolveResult, reject) => {
+    const args = sshArguments(alias, argv);
+    args.unshift('-o', 'ControlMaster=no', '-o', 'ControlPath=none', '-o', 'ClearAllForwardings=yes', '-o', 'RemoteCommand=none');
+    const child = spawnProcess('ssh', args, { stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'C.UTF-8', ...(process.env.SSH_AUTH_SOCK ? { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK } : {}) } });
+    let buffer = '', total = 0, phase, result, gateSent = false, failure, finished = false, killTimer, rejectTimer;
+    const clean = () => { clearTimeout(timer); clearTimeout(killTimer); clearTimeout(rejectTimer); signal?.removeEventListener('abort', fail); };
+    const fail = () => {
+      failure ??= new Error('Independent SSH network-fault control failed; preserve the private target journal');
+      if (finished || killTimer) return;
+      child.stdin.destroy(); child.kill('SIGTERM');
+      killTimer = setTimeout(() => child.kill('SIGKILL'), stopMs);
+      rejectTimer = setTimeout(() => { if (!finished) { finished = true; clean(); reject(failure); } }, stopMs * 2);
+    };
+    const timer = setTimeout(fail, timeoutMs);
+    child.stderr.resume(); child.stdin.on('error', fail);
+    child.stdout.on('data', chunk => {
+      if (finished || failure) return;
+      total += chunk.length; buffer += chunk.toString('utf8');
+      if (total > 16384 || Buffer.byteLength(buffer) > 8192) { fail(); return; }
+      let end;
+      while ((end = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
+        try {
+          const frame = JSON.parse(line);
+          if (!phase) {
+            phase = checkedPhase(frame);
+            Promise.resolve().then(() => onPhase(phase)).then(() => {
+              if (finished || failure) return;
+              gateSent = true;
+              child.stdin.end(JSON.stringify({ schemaVersion: 1, command: 'continue' }) + '\n');
+            }, fail);
+          } else {
+            if (!gateSent || result) throw new Error('Out-of-order network-fault control frame');
+            result = checkedNetworkResult(frame, phase);
+          }
+        } catch { fail(); return; }
+      }
+    });
+    child.once('error', fail);
+    child.once('close', code => {
+      if (finished) return;
+      finished = true; clean();
+      if (failure || code !== 0 || !phase || !gateSent || !result || buffer) reject(failure ?? new Error('Independent SSH network-fault control ended without verified evidence'));
+      else resolveResult(result);
+    });
+    signal?.addEventListener('abort', fail, { once: true }); if (signal?.aborted) fail();
+  });
+}
+export async function readNetworkGate(stream, phaseSent, { timeoutMs = 60000, signal } = {}) {
+  return new Promise((resolveGate, reject) => {
+    let input = '', finished = false;
+    const done = error => { if (finished) return; finished = true; clearTimeout(timer); stream.off('data', data); stream.off('end', ended); stream.off('error', failed); signal?.removeEventListener('abort', failed); if (error) reject(error); else resolveGate(); };
+    const failed = () => done(new Error('Network-fault control stream failed'));
+    const ended = () => { if (!finished) done(new Error('Network-fault gate ended before release')); };
+    const data = bytes => {
+      input += bytes.toString('utf8');
+      if (Buffer.byteLength(input) > 256 || !phaseSent()) { failed(); return; }
+      const newline = input.indexOf('\n'); if (newline < 0) return;
+      try { const value = JSON.parse(input.slice(0, newline)); if (input.slice(newline + 1) || Object.keys(value).sort().join() !== 'command,schemaVersion' || value.schemaVersion !== 1 || value.command !== 'continue') throw new Error('Invalid gate'); done(); }
+      catch { failed(); }
+    };
+    const timer = setTimeout(failed, timeoutMs);
+    stream.on('data', data); stream.once('end', ended); stream.once('error', failed);
+    signal?.addEventListener('abort', failed, { once: true }); if (signal?.aborted) failed();
+  });
+}
+/** Factory injection keeps ownership/reconnect decisions testable without SSH. */
+export function managedTunnelOwner({ enabled, factory, options, apiUrl }) {
+  let current;
+  return {
+    async start() { if (!enabled) return; if (current) throw new Error('Owned tunnel already exists'); current = await factory(options); if (current.apiUrl !== apiUrl) { await current.close(); current = null; throw new Error('Owned tunnel returned a different API origin'); } },
+    async close() { if (!current) return; await current.close(); current = null; },
+  };
+}
 export function checkedChildInput(input) {
   if (input.notePrefix !== undefined && !/^[a-z][a-z0-9-]{0,63}$/.test(input.notePrefix)) throw new Error('Invalid infrastructure note prefix');
   if (input.probeSandbox !== undefined && typeof input.probeSandbox !== 'boolean') throw new Error('Invalid sandbox probe flag');
@@ -53,9 +149,9 @@ export function noteName(input, key) {
 }
 /** A success receipt is published only after every ownership/credential/source
  * cleanup acknowledgement. The failure compensator below never short-circuits. */
-export async function settleTwoHostProbe({ stopOwned, restoreSources, revokeCredential, probeRevoked, removeCredential, revokeForeign, archiveFixtures, publish }) {
+export async function settleTwoHostProbe({ stopOwned, restoreSources, revokeCredential, probeRevoked, removeCredential, revokeForeign, archiveFixtures, closeTunnel = async () => {}, publish }) {
   await stopOwned(); await restoreSources(); await revokeCredential(); await probeRevoked();
-  await removeCredential(); await revokeForeign(); await archiveFixtures();
+  await removeCredential(); await revokeForeign(); await archiveFixtures(); await closeTunnel();
   return publish();
 }
 export async function compensateProbe(steps) {

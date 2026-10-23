@@ -11,7 +11,8 @@ import { CampRuntime } from '../../packages/camp-runtime/src/index.mjs';
 import { exportNativeStore } from '../../packages/camp-runtime/src/native-store.mjs';
 import { privateArtifactRequest, uploadPrivateBundle } from '../../packages/camp-runtime/src/private-artifacts.mjs';
 import { createWorkerDeclaration } from '../../packages/camp-protocol/src/index.js';
-import { checkedAlias, checkedPath, checkedLoopback, digest, sshJson, bootstrapSource, settleTwoHostProbe, compensateProbe } from './two-host-support.mjs';
+import { checkedAlias, checkedPath, checkedLoopback, digest, sshJson, sshGatedJson, bootstrapSource, settleTwoHostProbe, compensateProbe, managedTunnelOwner } from './two-host-support.mjs';
+import { createSshWorkerTunnel } from './ssh-worker-tunnel.mjs';
 
 export function remoteConfiguration(env, id) {
   const alias = checkedAlias(env.CAMP_REMOTE_SSH), release = checkedPath(env.CAMP_REMOTE_ROOT), apiUrl = checkedLoopback(env.CAMP_REMOTE_API_URL), toolchain = checkedPath(env.CAMP_REMOTE_TOOLCHAIN_BUNDLE);
@@ -19,7 +20,11 @@ export function remoteConfiguration(env, id) {
   assert.ok(operation !== release && !operation.startsWith(release + '/'), 'Probe workspace must be outside the immutable release');
   assert.equal(typeof env.CAMP_REMOTE_RELEASE_SHA256, 'string', 'CAMP_REMOTE_RELEASE_SHA256 must pin the reviewed release manifest');
   assert.match(env.CAMP_REMOTE_RELEASE_SHA256, /^[a-f0-9]{64}$/);
-  return { alias, release, apiUrl, toolchain, operation, releaseDigest: env.CAMP_REMOTE_RELEASE_SHA256 };
+  for (const flag of ['CAMP_REMOTE_MANAGED_TUNNEL', 'CAMP_REMOTE_NETWORK_FAULT']) if (env[flag] !== undefined && !['0', '1'].includes(env[flag])) throw new Error('Remote acceptance flags must be 0 or 1');
+  const managedTunnel = env.CAMP_REMOTE_MANAGED_TUNNEL === '1', networkFault = env.CAMP_REMOTE_NETWORK_FAULT === '1';
+  if (networkFault && !managedTunnel) throw new Error('Real network faults require the owned managed tunnel');
+  if (managedTunnel && (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(alias) || Number(new URL(apiUrl).port) < 1024)) throw new Error('Managed tunnel requires a plain SSH alias and remote port >=1024');
+  return { alias, release, apiUrl, toolchain, operation, releaseDigest: env.CAMP_REMOTE_RELEASE_SHA256, managedTunnel, networkFault };
 }
 export async function twoHostMain(env = process.env) {
   if (!process.argv.includes('--real-infra')) throw new Error('Use --real-infra for the explicit two-host acceptance');
@@ -42,12 +47,18 @@ export async function twoHostMain(env = process.env) {
   const moved = [];
   const helper = join(remote.operation, 'probe/scripts/mvp/two-host-target.mjs');
   const runRemote = (action, input, timeoutMs = 300000) => sshJson(remote.alias, ['timeout', '--signal=TERM', '--kill-after=45s', action === 'continue' ? '450s' : '240s', 'node', helper, action, remote.operation], input, { timeoutMs });
+  const interruptedSignal = new AbortController();
+  const onStop = () => interruptedSignal.abort(new Error('Two-host managed acceptance interrupted'));
+  const stopSignals = remote.managedTunnel ? ['SIGINT', 'SIGTERM', 'SIGHUP'] : [];
+  const tunnel = managedTunnelOwner({ enabled: remote.managedTunnel, factory: createSshWorkerTunnel, options: { hostAlias: remote.alias, localApiPort: Number(new URL(apiUrl).port), remotePort: Number(new URL(remote.apiUrl).port), signal: interruptedSignal.signal }, apiUrl: remote.apiUrl });
   const storagePath = `/camp/rooms/${source.roomId}/storage`, operationsPath = `/camp/rooms/${source.roomId}/storage-operations`;
   const sourceHome = join(source.folder, 'runtime'), sourceCheckout = join(source.folder, 'project'), sourceBundle = join(folder, 'backup');
   const runtime = new CampRuntime({ home: sourceHome, imageId: prior.imageId, toolchainBundle: bundle });
   const phases = [];
   async function phase(name, facts = {}) { phases.push({ name, at: new Date().toISOString(), ...facts }); await writeFile(join(folder, 'phases.json'), JSON.stringify(phases, null, 2), { mode: 0o600 }); }
+  for (const name of stopSignals) process.on(name, onStop);
   try {
+    await tunnel.start();
     await human(`/channels/${source.channelId}/unarchive`, {});
     credential = await human(`/camp/rooms/${source.roomId}/worker-token`, {}, 201);
     const localEnv = { PATH: env.PATH, LANG: 'C.UTF-8', CAMP_API_URL: apiUrl, CAMP_WORKER_TOKEN: credential.token, CAMP_RUNTIME_HOME: sourceHome, CAMP_RUNTIME_IMAGE: prior.imageId, CAMP_TOOLCHAIN_BUNDLE: bundle };
@@ -87,7 +98,16 @@ export async function twoHostMain(env = process.env) {
     foreignCredential = await human(`/camp/rooms/${foreignRoomId}/worker-token`, {}, 201);
     await runRemote('auth-wrong-room', { token: foreignCredential.token });
     for (const path of [sourceHome, sourceCheckout, sourceBundle]) { const hidden = path + '-unavailable-' + id; await rename(path, hidden); moved.push([hidden, path]); }
-    const interrupted = await runRemote('download-interrupted'); assert.equal(interrupted.requestHookInterrupted, true);
+    let interrupted;
+    if (remote.networkFault) {
+      interrupted = await sshGatedJson(remote.alias, ['timeout', '--signal=TERM', '--kill-after=45s', '240s', 'node', helper, 'download-network-fault', remote.operation], { signal: interruptedSignal.signal, onPhase: async facts => { await phase('remote_first_part_persisted', facts); await tunnel.close(); await phase('owned_api_tunnel_closed'); } });
+      assert.equal(interrupted.realNetworkInterrupted, true);
+      assert.equal(interrupted.artifactId, artifact.id); assert.equal(interrupted.transferManifestDigest, artifact.manifestDigest);
+      await tunnel.start();
+      await phase('owned_api_tunnel_reconnected');
+    } else {
+      interrupted = await runRemote('download-interrupted'); assert.equal(interrupted.requestHookInterrupted, true);
+    }
     const downloaded = await runRemote('download'); assert.equal(downloaded.artifactId, artifact.id);
     const restored = await runRemote('restore');
     assert.equal(restored.receipt.verifiedCandidates, plan.candidates.length); assert.equal(restored.receipt.historyVerified, true);
@@ -116,7 +136,7 @@ export async function twoHostMain(env = process.env) {
     const delivered = finished.goals.find(row => row.id === goal.id); assert.equal(delivered.executionPool.storageId, restored.receipt.targetStorageId); assert.notEqual(delivered.executionPool.poolId, oldPool.poolId);
     await runRemote('record-result', result); const exported = await runRemote('export-result');
     const final = await runRemote('final'); assert.equal(final.releaseDigest, remoteFacts.releaseDigest);
-    const receipt = { event: 'two_host_storage_passed', at: new Date().toISOString(), actualHostCount: 2, modelCalls: 0, roleOutputs: 'synthetic', roomId: source.roomId, sourceGoalId: source.goalId, continuationGoalId: goal.id, imageId: prior.imageId, toolchainDigest: prior.toolchainDigest, source: localFacts, target: remoteFacts, sourceStorageId: initial.storageId, targetStorageId: restored.receipt.targetStorageId, storageEpoch: storage.epoch, artifactId: artifact.id, manifestDigest: backupReceipt.manifestDigest, wholeHistoryVerified: true, preservedCandidates: restored.receipt.verifiedCandidates, sourcePathsUnavailable: true, corruptBundleRejected: true, activationCasAndReplay: true, oldIdleAndReadyHostFenced: true, legacyBypassRejected: true, ...interrupted, ...execution, ...exported, ...final, wrongRoomCredentialRejected: true, revokedCredentialRejected: true, ownedRemoteProcessStopped: true, remoteCredentialRemoved: true };
+    const receipt = { event: 'two_host_storage_passed', at: new Date().toISOString(), actualHostCount: 2, modelCalls: 0, roleOutputs: 'synthetic', managedTunnel: remote.managedTunnel, roomId: source.roomId, sourceGoalId: source.goalId, continuationGoalId: goal.id, imageId: prior.imageId, toolchainDigest: prior.toolchainDigest, source: localFacts, target: remoteFacts, sourceStorageId: initial.storageId, targetStorageId: restored.receipt.targetStorageId, storageEpoch: storage.epoch, artifactId: artifact.id, manifestDigest: backupReceipt.manifestDigest, wholeHistoryVerified: true, preservedCandidates: restored.receipt.verifiedCandidates, sourcePathsUnavailable: true, corruptBundleRejected: true, activationCasAndReplay: true, oldIdleAndReadyHostFenced: true, legacyBypassRejected: true, ...interrupted, ...execution, ...exported, ...final, wrongRoomCredentialRejected: true, revokedCredentialRejected: true, ownedRemoteProcessStopped: true, remoteCredentialRemoved: true };
     return await settleTwoHostProbe({
       stopOwned: async () => { const stopped = await runRemote('stop-owned'); assert.ok(stopped.ownedProcessAbsent || stopped.ownedProcessStopped); },
       restoreSources: async () => { while (moved.length) { const [hidden, originalPath] = moved.at(-1); await rename(hidden, originalPath); moved.pop(); } },
@@ -125,9 +145,11 @@ export async function twoHostMain(env = process.env) {
       removeCredential: async () => { await runRemote('clear-credential'); credentialRemoved = true; },
       revokeForeign: async () => { await human(`/camp/rooms/${foreignRoomId}/worker-tokens/${foreignCredential.tokenId}/revoke`, {}); foreignCredential = null; },
       archiveFixtures: async () => { await human(`/channels/${foreignChannelId}/archive`, {}); foreignChannelId = null; await human(`/channels/${source.channelId}/archive`, {}); },
+      closeTunnel: async () => { await tunnel.close(); interruptedSignal.signal.throwIfAborted(); },
       publish: async () => { await phase('passed', { activated, evidencePreserved: true, cleanupUnknown: false }); await writeFile(join(folder, 'result.json'), JSON.stringify(receipt, null, 2) + '\n', { mode: 0o600 }); await writeFile('.camp/two-host-storage-latest.json', JSON.stringify(receipt, null, 2) + '\n', { mode: 0o600 }); success = true; console.log(JSON.stringify(receipt)); return receipt; },
     });
   } finally {
+    for (const name of stopSignals) process.off(name, onStop);
     // Stop only the PID attested by this operation, and preserve all Store and
     // journal evidence. Failure to reconnect is cleanup-unknown, never success.
     if (!success) {
@@ -141,6 +163,7 @@ export async function twoHostMain(env = process.env) {
         ['remove_credential', async () => { if (bootstrapped && !credentialRemoved) await runRemote('clear-credential'); }],
         ['archive_foreign', async () => { if (foreignChannelId) await human(`/channels/${foreignChannelId}/archive`, {}); }],
         ['archive_source', () => human(`/channels/${source.channelId}/archive`, {})],
+        ['close_owned_tunnel', () => tunnel.close()],
       ]);
       await phase('failed', { activated, evidencePreserved: true, cleanupUnknown: true, physicalResourcesVerified: false, failedCleanup: failed });
     }

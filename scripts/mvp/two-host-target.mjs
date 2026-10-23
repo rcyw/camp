@@ -2,7 +2,7 @@
 // separately verified, immutable Worker release. This file is never a daemon.
 import assert from 'node:assert/strict';
 import { constants } from 'node:fs';
-import { lstat, readFile, writeFile, open, cp, unlink } from 'node:fs/promises';
+import { lstat, readFile, writeFile, open, cp, unlink, readdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -13,7 +13,7 @@ import { privateArtifactRequest, downloadPrivateBundle } from '../../packages/ca
 import { storageMain } from '../../packages/camp-runtime/scripts/storage.mjs';
 import { exportCandidate } from '../../packages/camp-runtime/src/export.mjs';
 import { superviseOwnedChild } from './owned-child.mjs';
-import { digest, checkedPath } from './two-host-support.mjs';
+import { digest, checkedPath, readNetworkGate, transportFailureCode } from './two-host-support.mjs';
 
 async function privateJson(path) {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -44,6 +44,10 @@ export async function targetMain(action, operation) {
     const containers = await containerFacts(runtime);
     await writeFile(join(operation, 'containers-before.json'), JSON.stringify(containers), { flag: 'wx', mode: 0o600 });
     result = { machineIdHash: digest((await readFile('/etc/machine-id', 'utf8')).trim()), bootIdHash: digest((await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim()), dockerIdHash: digest(facts.ID), releaseDigest: releaseHash, releaseCommit: verifiedRelease.manifest.source.commit, toolchainDigest: checked.report.toolchainDigest, imageId: checked.report.imageId, sourcePathsAbsent: true, checks: checked.report.checks };
+  } else if (action === 'download-network-fault') {
+    const discovery = await worker(`/storage-operations/${input.operationId}`);
+    result = await networkInterruptedDownload({ request, operationId: input.operationId, receipt: discovery.operation.backupReceipt, bundlePath: env.CAMP_STORAGE_BUNDLE });
+    console.log(JSON.stringify({ schemaVersion: 1, type: 'result', result })); return result;
   } else if (action === 'download-interrupted' || action === 'download') {
     const discovery = await worker(`/storage-operations/${input.operationId}`);
     let gets = 0;
@@ -144,6 +148,44 @@ export async function targetMain(action, operation) {
     await unlink(join(operation, 'worker-env.json')); result = { credentialRemoved: true };
   } else throw new Error('Unknown remote acceptance action');
   console.log(JSON.stringify(result)); return result;
+}
+/** onProgress is synchronous, but follows file sync, rename and directory
+ * sync. Pause in the next request wrapper, after proving those disk facts. */
+export async function networkInterruptedDownload({ request, operationId, receipt, bundlePath, download = downloadPrivateBundle, stdin = process.stdin, emit = value => console.log(JSON.stringify(value)), gateTimeoutMs = 60000 }) {
+  let first, phase, phaseSent = false, released = false, nextRequest = false;
+  const cancel = new AbortController();
+  const gate = readNetworkGate(stdin, () => phaseSent, { timeoutMs: gateTimeoutMs, signal: cancel.signal });
+  gate.catch(() => {});
+  const snapshot = async meta => {
+    const work = `${resolve(bundlePath)}.transfer-${meta.artifactId}`;
+    const state = await privateJson(join(work, 'transfer.json'));
+    assert.equal(state.artifactId, meta.artifactId); assert.match(state.manifestDigest, /^[a-f0-9]{64}$/);
+    assert.deepEqual(await readdir(join(work, 'parts')), ['0']);
+    const file = await open(join(work, 'parts/0'), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    let bytes;
+    try { const stat = await file.stat(); assert.ok(stat.isFile() && stat.uid === process.getuid() && !(stat.mode & 0o077) && stat.size > 0 && stat.size <= 8 * 1024 ** 2); bytes = await file.readFile(); assert.equal(bytes.length, stat.size); }
+    finally { await file.close(); }
+    return { schemaVersion: 1, type: 'phase', phase: 'first_part_persisted', artifactId: meta.artifactId, receivedParts: 1, totalParts: meta.totalParts, manifestDigest: state.manifestDigest, partSha256: digest(bytes), partBytes: bytes.length };
+  };
+  try {
+    await download({ operationId, receipt, bundlePath,
+      onProgress: meta => { if (meta.receivedParts === 1) { assert.ok(meta.totalParts >= 2); first = meta; } },
+      request: async (path, options) => {
+        if (first && /\/parts\/\d+$/.test(path)) {
+          assert.ok(!phaseSent, 'Only one post-gate network request may run');
+          phase = await snapshot(first); phaseSent = true; emit(phase);
+          await gate; released = true; nextRequest = true;
+        }
+        return request(path, options);
+      },
+    });
+    throw new Error('The API stayed reachable after closing the owned tunnel');
+  } catch (error) {
+    const code = transportFailureCode(error);
+    if (!phase || !released || !nextRequest || !code) throw error;
+    assert.deepEqual(await snapshot(first), phase, 'Partial download evidence changed after network failure');
+    return { realNetworkInterrupted: true, requestHookInterrupted: false, partialRetained: true, artifactId: phase.artifactId, transferManifestDigest: phase.manifestDigest, partSha256: phase.partSha256, transportCode: code };
+  } finally { cancel.abort(); }
 }
 async function containerFacts(runtime) {
   return (await runtime.dockerCall(['ps', '-a', '--no-trunc', '--format', '{{json .}}'])).stdout.trim().split('\n').filter(Boolean).map(line => { const row = JSON.parse(line); return { id: row.ID, state: row.State, name: row.Names }; }).sort((a, b) => a.id.localeCompare(b.id));
