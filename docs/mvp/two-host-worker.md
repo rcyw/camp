@@ -4,6 +4,10 @@ This procedure moves one cold, accepted Room Store between two independent
 Linux hosts. One location remains the writable authority. It does not enable
 cross-host concurrent builders or import independent commit graphs.
 
+The optional [real remote model acceptance](#real-models-on-a-persistent-remote-worker)
+below creates a separate Room and leaves its systemd Worker running. It is a
+different acceptance from the synthetic storage-handoff procedure.
+
 The automated probe is deliberately separate from the one-host, two-daemon
 storage test. It uses synthetic role decisions, real Docker/LayerFS sandboxes,
 native integration, operator checks and the control API. It makes no provider
@@ -255,3 +259,97 @@ digest, and use a stable HTTPS control origin with a provisioned Room credential
 Code upgrades must retain the active Store and journals. Keep one writable Room
 authority and respect the current Docker-daemon/UID host-manager exclusion when
 planning pool placement.
+
+## Real models on a persistent remote Worker
+
+`remote-model-smoke.mjs` is a separate, explicitly paid acceptance harness. It
+never substitutes synthetic sessions, writes role approvals or drives the model
+tools from its host. It creates a fresh Room with a three-node dependency graph:
+an approved shared foundation feeds two independent leaves, whose approved
+candidates are joined by trusted integration. Project tests and a frozen external
+contract check the final candidate. Only the three implementation modules may
+change; tests, metadata and the full file inventory are protected.
+
+Prepare a reviewed release, exact image/toolchain and a stable HTTPS control
+origin reachable from MY and its sandboxes. This harness requires HTTPS for the
+remote Worker; its local administrator connection may still use source loopback.
+Use a separate operator-provisioned private model credential/configuration file.
+The harness does not read `.camp/runtime.env`, transmit a model key, or write one
+into tracked files, argv, context output or its remote `worker.env`.
+
+```sh
+export CAMP_REMOTE_SSH=camp-target
+export CAMP_REMOTE_ROOT=/srv/camp/releases/<reviewed-commit>
+export CAMP_REMOTE_RELEASE_SHA256=<reviewed manifest SHA>
+export CAMP_REMOTE_TOOLCHAIN_BUNDLE=/srv/camp/toolchains/<digest>
+export CAMP_REMOTE_MODEL_API_URL=https://<stable-control-domain>
+export CAMP_REMOTE_MODEL_OPERATIONS_ROOT=/srv/camp/operations
+export CAMP_REMOTE_MODEL_SERVICE=camp-worker-model.service
+export CAMP_REMOTE_MODEL_PROTECTED_ROOMS=<existing-Room-UUID>,<another-Room-UUID>
+node scripts/mvp/remote-model-smoke.mjs prepare
+```
+
+`prepare` creates only a new Room and its configuration. Fixture source is written
+on the destination, under a fresh private operation; the controller does not
+require a source checkout on its own host. The output supplies Room ID, remote
+`worker.env`, source/harness locations and a local 0600 context path, without
+printing the Room credential. The complete schema-1 credential is written only
+to a separate private 0600 `credential.json`; `worker.env` contains its path and
+the fixed `CAMP_WORKER_ROOM_ID`, not a bearer secret. Harness files are published
+with an explicit FD chmod, so an operator's private umask cannot make the
+read-only file bind unreadable to verification UID 501. The remote overlay remains outside the immutable
+release. Existing Rooms are never repurposed. `CAMP_IMAGE_RECEIPT` selects the
+matching local image/toolchain identity; it defaults to the 0.7.0 receipt.
+
+An operator then uses the [persistent service installer](../../scripts/deploy/worker-service.md)
+to configure the named systemd service to execute the absolute
+`<release>/packages/camp-runtime/scripts/worker-pool.mjs` with Node 24, using
+the returned Room/credential/harness paths and separately managed model
+configuration. The installer generates its own non-secret environment file
+from the reviewed service configuration. It must be a
+persistent pool, without `--once`, synthetic session injection or a second host
+manager. This is an operator action: the harness does not start, stop, replace or
+restart a service. Respect the existing daemon/UID manager exclusion and the
+single writable authority; provision an idle window or a suitable separate host
+before enabling this new service.
+
+After service readiness, explicitly authorize the model work:
+
+```sh
+node scripts/mvp/remote-model-smoke.mjs submit --real-model --context <private-context.json>
+node scripts/mvp/remote-model-smoke.mjs verify --context <private-context.json>
+```
+
+Submission first checks that systemd is active, its MainPID is the standard
+verified release Worker, and the HTTPS health endpoint works. The Goal is bounded
+to 24 Runs, 10 reviews and 1,800 seconds. A submission intent is saved before the
+POST. If its response is lost, rerunning reconciles the uniquely named existing
+Goal; an unresolved intent requires inspection instead of blindly creating a
+second paid Goal. Preparation does not submit paid work; verification only reads
+state and evidence. Failed verification does not retry, cancel or fabricate a
+successful outcome.
+
+Verification requires API-authoritative real session IDs and progress for all
+three logical roles, candidate-bound approvals, approved dependency producer
+identities, the correct native common ancestor, independent passed checks and
+the final accepted Room head. Every producer Diff must leave protected paths
+untouched. A read-only remote probe checks the unchanged original source and
+external harness, the active standard service, and the same storage/pool binding.
+It reads only the matching Goal's private Worker journals for model accounting.
+
+The result distinguishes `agentRuns` from `modelUsage.proxyRequestAttempts` and
+request/response bytes. Proxy attempts are the trusted journal's counters,
+including retries or failed upstream attempts; they are not a provider token or
+billing report. Missing, zero, unsettled, duplicated or wrong-epoch counters fail
+acceptance. Hashes distinguish the source controller host and the remote Worker.
+The configured protected existing Rooms must retain their accepted head, storage
+binding and Run facts. With no protected IDs configured, the result reports a
+count of zero and does not claim those Rooms were checked.
+
+Successful evidence goes to `.camp/remote-model-latest.json` and the private run
+directory. The harness leaves this new Room, credential and persistent Worker
+available; it does not archive, revoke or stop them. There is no export helper
+mount during the standing pool: the frozen verifier receipt and recorded Diff
+are the authoritative candidate evidence. Stop/recover/export operations remain
+separate operator workflows. Until a real-model receipt is produced, preparation
+or local harness tests do not establish a remote model acceptance pass.

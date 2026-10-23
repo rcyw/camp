@@ -33,6 +33,10 @@ rules remain in [packages/cli/AGENTS.md](packages/cli/AGENTS.md).
 For Worker distribution and two-host acceptance, follow the
 [deployment guide](docs/mvp/two-host-worker.md). Keep the immutable release,
 fixed toolchain, private operation data and active Store in separate directories.
+For persistent deployments, follow the [HTTPS and service contract](docs/mvp/https-control-plane.md)
+and [private OCI distribution](docs/mvp/private-oci.md). Preserve Room identity
+across restarts, keep credentials outside releases, and distinguish real model
+acceptance from synthetic infrastructure checks.
 
 Upstream Raft is a release mirror with its own contribution policy. Camp
 development takes place in this fork.
