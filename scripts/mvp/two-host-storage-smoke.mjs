@@ -91,9 +91,11 @@ export async function twoHostMain(env = process.env) {
     for (const field of ['machineIdHash', 'bootIdHash', 'dockerIdHash']) assert.notEqual(remoteFacts[field], localFacts[field], 'Two-host acceptance requires independent machine/kernel/Docker identities');
     assert.equal(remoteFacts.imageId, prior.imageId); assert.equal(remoteFacts.toolchainDigest, prior.toolchainDigest);
     await phase('two_independent_hosts_verified', { source: localFacts, target: remoteFacts });
-    const foreignChannel = await human('/channels/', { name: id + '-wrong-room', visibility: 'public', description: 'Scoped credential isolation probe' });
+    // Channel handles share Raft's 32-character name contract.
+    const isolationName = 'camp-auth-' + randomUUID().replaceAll('-', '').slice(0, 20);
+    const foreignChannel = await human('/channels/', { name: isolationName, visibility: 'public', description: 'Scoped credential isolation probe' });
     foreignChannelId = foreignChannel.channel?.id ?? foreignChannel.id;
-    const foreignRoom = await human('/camp/rooms', { channelId: foreignChannelId, name: id + '-wrong-room', project: { name: 'Isolated credential probe' } }, 201);
+    const foreignRoom = await human('/camp/rooms', { channelId: foreignChannelId, name: isolationName, project: { name: 'Isolated credential probe' } }, 201);
     foreignRoomId = foreignRoom.id;
     foreignCredential = await human(`/camp/rooms/${foreignRoomId}/worker-token`, {}, 201);
     await runRemote('auth-wrong-room', { token: foreignCredential.token });

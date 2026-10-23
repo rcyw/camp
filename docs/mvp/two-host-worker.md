@@ -8,8 +8,8 @@ The automated probe is deliberately separate from the one-host, two-daemon
 storage test. It uses synthetic role decisions, real Docker/LayerFS sandboxes,
 native integration, operator checks and the control API. It makes no provider
 request and does not copy a model key. A passing run is not a real-model test.
-Until a two-host receipt exists, this document describes an acceptance procedure,
-not a claim that it has passed.
+The two-host acceptance below passed on 2026-10-23. Its scope and retained
+evidence are recorded at the end of this guide.
 
 ## Prepare the destination
 
@@ -207,3 +207,51 @@ again automatically. An API failure stops an active Worker safely; this procedur
 does not promise uninterrupted execution through a network partition. Preserve
 uncertain Stores and journals and use the existing doctor/recovery tools. No
 global cleanup command belongs in this acceptance procedure.
+
+## Verified on 2026-10-23
+
+The complete procedure passed between two independent Linux hosts, with
+different machine, boot and Docker identities. The destination used the
+standalone 63-file Worker release without a monorepo install, Node 24.21
+(ABI 137), glibc 2.39 and Docker 29.6.2. Its 278-file toolchain inventory,
+native addon and exact original image identity were verified before execution.
+
+The run preserved all four frozen native candidates and the complete Store
+history. It rejected a corrupted backup, checked activation CAS and replay,
+advanced storage epoch from 1 to 2 without changing the accepted candidate,
+and fenced both idle and ready old-location claims, including the legacy
+unpooled bypass. A fresh destination pool then completed a nine-Run delivery
+with two live builders, enforced resource limits, native integration, independent
+verification and fresh final review. Export on the destination preserved the
+original files and proved the new nonce files belonged to a different candidate
+and file root. The accepted head advanced once, after the new delivery.
+
+Managed connectivity was tested with a genuine outage: after the first part
+was synced, the owned API tunnel was closed. The next target fetch failed with
+`ECONNREFUSED` while the independent control SSH session stayed alive. Reconnection
+at the same port resumed the same artifact and private journal. A separate
+transfer-only run observed `UND_ERR_SOCKET` and verified every received file SHA.
+Neither run injected an exception to stand in for that network failure.
+
+Wrong-Room and revoked credentials were rejected. All test pools, tunnels and
+credential files were stopped or removed before publishing success. The source
+watcher and original standing pool were restored, preserving the original
+Room's nine Runs, accepted head and storage identity. The destination's four
+pre-existing containers retained their IDs and states. Stores, immutable
+releases and operation evidence remain available; no permanent remote Worker
+service was enabled by this development acceptance.
+
+Retained local receipts are `.camp/two-host-storage-latest.json`,
+`.camp/remote-deploy/installed-target.json` and
+`.camp/remote-deploy/private-network-real.json`. All role decisions were
+synthetic and model calls were zero. This establishes private cross-host Store
+transport, native cold handoff and continued execution. Provider-backed DSH
+execution on the destination, a network outage during a live Worker Run and
+multi-host concurrent writers remain separate acceptance boundaries.
+
+For continuous deployment, distribute fixed images through a private OCI
+registry with cached base layers, keep the toolchain separately addressable by
+digest, and use a stable HTTPS control origin with a provisioned Room credential.
+Code upgrades must retain the active Store and journals. Keep one writable Room
+authority and respect the current Docker-daemon/UID host-manager exclusion when
+planning pool placement.

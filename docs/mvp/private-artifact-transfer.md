@@ -153,11 +153,22 @@ Receipt: `.camp/storage-infra-latest.json`, with `privateApiTransport: true`,
 distinct `sourceDaemonId`/`targetDaemonId` and `actualHostCount: 1`. The private
 daemon was stopped after verification; its Store volumes and evidence remain
 available. This establishes API transfer and independent daemon/storage
-restoration. Two actual hosts, independent kernels and a real network failure
-domain remain the next deployment acceptance.
+restoration. The subsequent two-host acceptance below covers independent
+kernels and a real network failure domain.
 
 Automated regressions cover Room/model/revoked credentials, changed manifests,
 duplicate concurrent part acknowledgement, incomplete/corrupted sealing,
 unpublished discard, HTTPS/origin/redirect restrictions, interruption recovery
 and publication-before-cleanup crash recovery. A verified published bundle
 cleans only a matching private transfer journal; unrelated state is preserved.
+
+The complete [two-host handoff acceptance](./two-host-worker.md#verified-on-2026-10-23)
+also passed on 2026-10-23. Its receipt, `.camp/two-host-storage-latest.json`,
+records `actualHostCount: 2`, full native history and four preserved candidates,
+a genuine API-tunnel outage with `ECONNREFUSED`, verified journal resume,
+corrupt-bundle rejection, activation CAS/replay and old-location fencing.
+The new authority completed another full nine-Run delivery and exported both
+inherited and newly written files. Wrong-Room and revoked credentials were
+rejected, and owned processes, temporary credentials and tunnels were cleaned
+before success was published. Role decisions were synthetic, with zero model
+calls. Concurrent writers and live-Run network-loss recovery are separate gates.
