@@ -16,6 +16,7 @@ import { createWorkerDeclaration } from '../../packages/camp-protocol/src/index.
 import { CampRuntime } from '../../packages/camp-runtime/src/index.mjs';
 import { exportCandidate } from '../../packages/camp-runtime/src/export.mjs';
 import { superviseOwnedChild } from './owned-child.mjs';
+import { checkedChildInput, noteName } from './two-host-support.mjs';
 
 const execute = promisify(execFile);
 const docker = args => execute('docker', ['--host', 'unix://' + (process.env.CAMP_DOCKER_SOCKET ?? '/var/run/docker.sock'), ...args], { timeout: 30000, maxBuffer: 1024 * 1024 });
@@ -32,7 +33,8 @@ if (['--serial-probe', '--policy-probe'].includes(process.argv[2])) {
   assert.equal(claims, 0); assert.equal(sessions, 0);
   console.log(JSON.stringify({ probe: serialProbe ? 'foreign_serial_rejected' : 'invalid_policy_recovered', normalClaims: claims, modelSessions: sessions }));
 } else if (process.argv[2] === '--child') {
-  const input = JSON.parse(await readFile(process.argv[3], 'utf8'));
+  const input = checkedChildInput(JSON.parse(await readFile(process.argv[3], 'utf8')));
+  if (input.expectedParentPid !== undefined) assert.equal(process.ppid, input.expectedParentPid, 'The owned probe parent died before child initialization');
   const builds = new Map();
   let markBoth, markReview;
   const bothStarted = new Promise(resolveBoth => { markBoth = resolveBoth; });
@@ -47,9 +49,15 @@ if (['--serial-probe', '--policy-probe'].includes(process.argv[2])) {
         const workerId = env.CAMP_WORKER_ID, epoch = Number(env.CAMP_RUN_EPOCH), runId = env.CAMP_RUN_ID;
         const request = workerApiRequest({ CAMP_API_URL: input.apiUrl, CAMP_WORKER_TOKEN: process.env.CAMP_WORKER_TOKEN });
         const { run } = await request(`/runs/${runId}/state`);
+        if (input.probeSandbox) {
+          const containerId = launch.args[launch.args.indexOf('node') - 1];
+          const probe = JSON.parse((await docker(['exec', '--user', '501:20', containerId, 'node', '-e', 'fetch(process.argv[1]+"/health",{signal:AbortSignal.timeout(10000),redirect:"error"}).then(async r=>{if(r.status!==200)throw Error("health status");const j=await r.json();if(!j||typeof j!=="object")throw Error("health JSON");console.log(JSON.stringify({status:r.status,json:true}))}).catch(()=>process.exit(1))', env.CAMP_API_URL])).stdout);
+          assert.equal(probe.status, 200); assert.equal(probe.json, true);
+          console.log(JSON.stringify({ probe: 'sandbox_api_reachable', runId }));
+        }
         const tool = (path, body) => workerApiRequest({ CAMP_API_URL: input.apiUrl, CAMP_WORKER_TOKEN: env.CAMP_RUN_TOKEN })(`/runs/${runId}/${path}`, { workerId, epoch, ...body });
         if (run.taskKind === 'plan') {
-          await tool('plan', { planRevision: 1, summary: 'Independent notes from one frozen baseline', tasks: ['left', 'right'].map(key => ({ key, title: 'Add ' + key + ' note', description: 'Write only ' + key + '-note.txt', acceptance: 'Contains the assigned note', verification: 'External immutable contract checks both notes after integration' })) });
+          await tool('plan', { planRevision: 1, summary: 'Independent notes from one frozen baseline', tasks: ['left', 'right'].map(key => ({ key, title: 'Add ' + key + ' note', description: 'Write only ' + noteName(input, key), acceptance: 'Contains the assigned note', verification: 'External immutable contract checks both notes after integration' })) });
         } else if (run.taskKind === 'build') {
           const containerId = launch.args[launch.args.indexOf('node') - 1];
           builds.set(runId, { runId, workerId, epoch, containerId, key: run.planItemKey, inputCandidate: run.inputCandidate });
@@ -68,7 +76,7 @@ if (['--serial-probe', '--policy-probe'].includes(process.argv[2])) {
           // Force reversed completion and overlapping build/review through
           // server facts rather than a machine-dependent sleep duration.
           if (run.planItemKey === 'left') await rightReviewStarted;
-          await docker(['exec', '--user', '501:20', '--workdir', launch.cwd, containerId, 'node', '-e', 'require("node:fs").writeFileSync(process.argv[1],process.argv[2])', run.planItemKey + '-note.txt', run.planItemKey + '\n']);
+          await docker(['exec', '--user', '501:20', '--workdir', launch.cwd, containerId, 'node', '-e', 'require("node:fs").writeFileSync(process.argv[1],process.argv[2])', noteName(input, run.planItemKey), run.planItemKey + '\n']);
         } else if (['review', 'final_review'].includes(run.taskKind)) {
           if (run.taskKind === 'review' && run.planItemKey === 'right') {
             const left = [...builds.values()].find(value => value.key === 'left');

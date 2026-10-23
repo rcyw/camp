@@ -114,6 +114,11 @@ paths and logical project IDs.
 
 ## Cross-host release boundary
 
+Worker packaging, private SSH development connectivity and the reproducible
+two-host probe are described in the [deployment guide](./two-host-worker.md).
+Installing a Worker release is separate from transferring a candidate Store;
+the latter must still use this private artifact and native restoration protocol.
+
 The supported execution design is one active writable authority per Room,
 with cold handoff to a verified new location. The pinned LayerFS SDK has no
 supported export/import of independent commit graphs. Two clones can retain

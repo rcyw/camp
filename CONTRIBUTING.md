@@ -30,6 +30,10 @@ immutable candidate identities, and verify recovery and
 protocol compatibility at the affected boundaries. The existing CLI-specific
 rules remain in [packages/cli/AGENTS.md](packages/cli/AGENTS.md).
 
+For Worker distribution and two-host acceptance, follow the
+[deployment guide](docs/mvp/two-host-worker.md). Keep the immutable release,
+fixed toolchain, private operation data and active Store in separate directories.
+
 Upstream Raft is a release mirror with its own contribution policy. Camp
 development takes place in this fork.
 
