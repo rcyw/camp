@@ -41,6 +41,13 @@ export function remoteModelTargetArguments(operation, action) {
   // never loads the separate model environment or a provider credential.
   return ['timeout', '--signal=TERM', '--kill-after=15s', '120s', 'node', '--use-system-ca', join(operation, 'probe/scripts/mvp/remote-model-target.mjs'), action, operation];
 }
+export function validateRemoteModelDeployment(context, evidence) {
+  assert.match(context.releaseDigest, /^[a-f0-9]{64}$/);
+  assert.equal(evidence.releaseDigest, context.releaseDigest, 'The live release differs from the reviewed local context');
+  assert.equal(evidence.service?.name, context.serviceName);
+  assert.equal(evidence.service.active, true);
+  assert.equal(evidence.service.standardWorkerCommand, true);
+}
 const fact = state => ({ head: state.room.acceptedHead, storageId: state.room.storageId, storageEpoch: state.room.storageEpoch, runs: state.runs.map(run => ({ id: run.id, status: run.status, epoch: run.epoch, candidate: run.candidate, completedAt: run.completedAt })).sort((a, b) => a.id.localeCompare(b.id)) });
 async function apiClient(env) {
   const url = new URL(env.CAMP_API_URL ?? 'http://127.0.0.1:13018');
@@ -61,7 +68,7 @@ export async function remoteModelMain(args = process.argv.slice(2), env = proces
   assert.equal(context.schemaVersion, 1); assert.equal(context.mode, 'externalPersistentWorker');
   const target = (action, input) => sshJson(context.alias, remoteModelTargetArguments(context.operation, action), input, { timeoutMs: 150000 });
   if (options.action === 'submit') {
-    await target('service');
+    validateRemoteModelDeployment(context, await target('service'));
     const snapshot = await api('/camp/rooms/' + context.roomId);
     let goal = snapshot.goals.find(value => value.id === context.goalId);
     if (!goal) {
@@ -105,6 +112,7 @@ export async function remoteModelMain(args = process.argv.slice(2), env = proces
   let evidence, usage;
   for (let attempt = 0; attempt < 5; attempt++) {
     evidence = await target('evidence', { goalId: context.goalId });
+    validateRemoteModelDeployment(context, evidence);
     try { usage = validateModelUsage(selected, evidence); break; } catch (error) { if (attempt === 4) throw error; await delay(500); }
   }
   assert.equal(evidence.originalSourceUnchanged, true); assert.equal(evidence.externalHarnessUnchanged, true);

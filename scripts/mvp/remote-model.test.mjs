@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { serializeIntegrationInput } from '../../packages/camp-protocol/src/index.js';
 import { modelFixture, modelContract, modelGoal, modelHarnessMode, hash, validateModelDelivery, validateModelUsage, standardModelWorkerCommand } from './remote-model-fixture.mjs';
-import { remoteModelOptions, remoteModelArguments, remoteModelBootstrap, remoteModelChannelName, remoteModelTargetArguments } from './remote-model-smoke.mjs';
+import { remoteModelOptions, remoteModelArguments, remoteModelBootstrap, remoteModelChannelName, remoteModelTargetArguments, validateRemoteModelDeployment } from './remote-model-smoke.mjs';
 
 const execute = promisify(execFile);
 test('paid submission requires an explicit separate command; preparing and verifying do not imply model authorization', () => {
@@ -32,6 +32,13 @@ test('service provenance rejects inline evaluators, injected loaders and once-mo
   assert.equal(standardModelWorkerCommand(['/usr/bin/node', '--env-file=/private/model.env', '--env-file=/private/worker.env', entry], release), true);
   assert.equal(standardModelWorkerCommand(['/usr/bin/node', '--env-file=/private/model.env', '--env-file=/private/model.env', entry], release), false);
   assert.equal(standardModelWorkerCommand(['node', entry, '--once'], release), false);
+});
+test('a stale local context cannot attest another live release or service before paid submission or verification', () => {
+  const context = { releaseDigest: 'a'.repeat(64), serviceName: 'camp-worker-my.service' };
+  const evidence = { releaseDigest: context.releaseDigest, service: { name: context.serviceName, active: true, standardWorkerCommand: true } };
+  validateRemoteModelDeployment(context, evidence);
+  assert.throws(() => validateRemoteModelDeployment(context, { ...evidence, releaseDigest: 'b'.repeat(64) }));
+  assert.throws(() => validateRemoteModelDeployment(context, { ...evidence, service: { ...evidence.service, name: 'camp-worker-other.service' } }));
 });
 async function project() {
   const root = await mkdtemp(join(tmpdir(), 'camp-remote-model-test-')), folder = join(root, 'project'), fixture = modelFixture('test-remote-model');

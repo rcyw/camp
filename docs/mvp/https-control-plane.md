@@ -196,7 +196,7 @@ an OCI cold-download claim or a live-Run power-loss acceptance.
 
 ## Executed acceptance: 2026-10-23
 
-The final verified Worker release is source commit
+The initial real-model acceptance used Worker source commit
 `fb670a98a7795ffbe9c22921e586d32b57173d17`, manifest
 `ade666303c2eb3d7f948a1ade8dfb754fb5aa8aa81060d7eab8f0008fd507ffb`.
 HK runs enabled `camp-control-api.service`, nginx and the certificate timer.
@@ -222,6 +222,49 @@ restart then restored verified MY HTTPS access with the same results. Both
 services remain enabled and active. The receipt is
 `.camp/production/persistent-service-recovery.json`. No machine reboot or
 active-Run crash/power-loss recovery was claimed.
+
+## Deployment review: 2026-10-23
+
+The reviewed Runtime is published as a separate 65-file release from
+`defa1e4d6f8f4616e0e5ea7ac777c522f12ce6db`, manifest
+`5b16e54fcf4e66d0ff961475c83d596f91cb2c28b4029814398b825340413fcf`.
+The installer upgrades the existing service to a resumable schema-2 installation
+with a pinned environment generation, preserving its Room, credential path,
+runtime home, pool, Store and settled journals.
+
+The review includes 603 passing automated tests: 321 Runtime, 51 deployment,
+62 end-to-end tool, 49 protocol/plugin and 120 server tests, including real
+PostgreSQL checks. Server type checking and scoped lint also pass. Regression
+cases cover interrupted installation and certificate publication, competing
+installers, loaded systemd overrides, public bind overrides, capped credential
+renewal, suspended-clock recovery, invalid credential/CA files, OCI daemon/TLS
+policy, wrong published image identity and forged behavior-probe completion.
+
+MY independently pulls and checks the existing private OCI digest with the
+reviewed helper. HK renews its leaf and reloads nginx while retaining the public
+root, online issuer and serving key; verified MY HTTPS access succeeds.
+
+The already accepted candidate is exported by exact immutable identity and
+rechecked in two isolated containers: all six provided tests and the strengthened
+external contract pass. The export, original contract, journals, pool and project
+metadata remain unchanged. Room policy revision 2 selects a separate,
+content-addressed external harness for future Goals. The completed model Goal
+retains its original frozen policy and original model-execution evidence.
+This review submits no new paid model Goal.
+
+Private review receipts live under `.camp/review-https`, including the OCI pull,
+certificate comparison, accepted-candidate recheck and policy update. Retain the
+original model context/receipt as historical execution evidence; a post-upgrade
+context describes the current service release separately. Submission and
+verification reject a live release/service that differs from the reviewed local
+context.
+
+After this upgrade, an idle SIGKILL again recovers both MY lanes with the same
+pool, storage and all eleven settled completion records. HK API restart restores
+MY HTTPS access; both lane timestamps advance after the restart intent. The API
+listener remains `127.0.0.1:13018`. Both services remain enabled and active, and
+the original demo retains its nine Runs and accepted head. The updated recovery
+receipt is `.camp/production/persistent-service-recovery.json`.
 
 A preliminary model trial exposed a production staging bug: `writeFile` mode
 `0444` was masked to root-only `0400` by the private service umask. The fixed
