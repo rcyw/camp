@@ -25,6 +25,9 @@ The [bounded pair guide](docs/mvp/bounded-pair-execution.md) adds two concurrent
 builder attempts on one host, pool admission and recovery of both execution lanes.
 The [single-host worker guide](docs/mvp/single-host-worker.md) covers pinned toolchain
 bundles, connection diagnostics, resource bounds and offline cleanup/recovery.
+The [storage lifecycle](docs/mvp/storage-lifecycle.md) defines cold candidate
+backups, isolated restore and explicit storage migration while retaining
+candidate identities and historical execution evidence.
 The [durable execution design](docs/mvp/durable-execution.md) covers goal budgets,
 worker recovery and result outboxes; [future dependency plans](docs/mvp/durable-workflows-next.md)
 describe the separate graph scheduling stage.
@@ -45,6 +48,7 @@ channels, threads, direct messages and tasks alongside people.
 - Run two independent items concurrently with one bounded local Worker pool.
 - Connect a worker with a downloadable configuration and checks before allocation.
 - Recover owned sandboxes and exact result outboxes after a worker crash.
+- Back up candidate history, verify an isolated restore and explicitly switch storage locations.
 - Keep task ownership, model execution and sandbox lifecycle explicit.
 
 The inherited commands and package names (`raft`, `raft-computer`, `raftdev`

@@ -47,6 +47,49 @@ test('stable pool identity binds the original Docker host, API, base worker and 
     const text = await readFile(join(home, 'execution-pool.json'), 'utf8'); assert(!text.includes('token'));
   } finally { await rm(home, { recursive: true, force: true }); }
 });
+test('an existing pool seeds its unchanged physical identity only after all journal recovery and successful configuration checks', async () => {
+  for (const configuration of ['original', 'changed']) {
+    const f = await fixture(), states = new Map(), completions = [];
+    try {
+      const metadata = await openPoolState({ home: f.home, apiUrl: f.env.CAMP_API_URL, baseWorkerId: f.env.CAMP_WORKER_ID, dockerId: facts.ID, resources, policy });
+      const originalMetadata = await readFile(join(f.home, 'execution-pool.json'), 'utf8');
+      await rm(join(f.home, 'storage-identity.json'));
+      for (const workerId of [f.env.CAMP_WORKER_ID, ...metadata.workerIds]) {
+        const journal = await new WorkerJournal({ home: f.home, apiUrl: f.env.CAMP_API_URL, workerId }).ready(), runId = randomUUID();
+        const record = await journal.recordClaim({ id: runId, roomId: randomUUID(), executor: 'agent', epoch: 1 }, { runtime: f.runtime.runIdentity(`${runId}-e1`) });
+        await journal.update(record, { cleanupKnown: true });
+        await journal.prepareCompletion(record, { workerId, epoch: 1, status: 'completed', summary: 'Original immutable result' });
+        states.set(runId, { run: { id: runId, workerId, epoch: 1, status: 'completed', cleanupState: 'confirmed' }, cleanupState: 'confirmed', leaseValid: false, replaced: false });
+      }
+      if (configuration === 'changed') f.env.CAMP_AGENT_CPU_MILLIS = '1000';
+      const original = f.request;
+      f.request = async (path, body) => {
+        if (path.endsWith('/state')) return states.get(path.split('/')[2]);
+        if (path.endsWith('/complete')) {
+          await assert.rejects(access(join(f.home, 'storage-identity.json')), { code: 'ENOENT' });
+          completions.push(body); return { replayed: true };
+        }
+        if (path === '/claim' && !body.restoreOnly) {
+          assert.equal(completions.length, 3);
+          const storage = JSON.parse(await readFile(join(f.home, 'storage-identity.json')));
+          assert.equal(storage.storageId, metadata.storageId); assert.equal(storage.storeId, metadata.storeId); assert.equal(storage.dockerId, facts.ID);
+        }
+        return original(path, body);
+      };
+      if (configuration === 'changed') {
+        await assert.rejects(startWorkerPool(f), { code: 'camp_pool_identity' });
+        await assert.rejects(access(join(f.home, 'storage-identity.json')), { code: 'ENOENT' });
+        assert.equal(f.requests.filter(request => request.path === '/claim' && !request.body.restoreOnly).length, 0);
+      } else {
+        const result = await startWorkerPool(f);
+        assert.equal(result.executionPool.storageId, metadata.storageId);
+        assert(f.requests.some(request => request.path === '/claim' && !request.body.restoreOnly));
+      }
+      assert.equal(completions.length, 3);
+      assert.equal(await readFile(join(f.home, 'execution-pool.json'), 'utf8'), originalMetadata);
+    } finally { await f.close(); }
+  }
+});
 test('a manager lock spans different runtime homes on the same Docker host and is retained until release', async () => {
   const root = await mkdtemp(join(tmpdir(), 'camp-host-manager-lock-'));
   const runtime = home => ({ home, dockerCall: async () => ({ stdout: JSON.stringify(facts) }) });

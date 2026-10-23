@@ -12,6 +12,7 @@ import * as runs from "../services/camp/runs";
 import * as goals from "../services/camp/goals";
 import * as plans from "../services/camp/plans";
 import * as questions from "../services/camp/questions";
+import * as storage from "../services/camp/storage";
 import { setVerificationPolicy } from "../services/camp/verification";
 import { goalVersions, versionChanges, versionVerification } from "../services/camp/changes";
 import { goalResultManifest } from "../services/camp/presentation";
@@ -123,6 +124,32 @@ campRouter.put("/rooms/:roomId/project", endpoint(async (req, res) => {
   await emitState(req, room.id);
   res.json(await rooms.roomSnapshot(room.id, req.userId!));
 }));
+campRouter.get("/rooms/:roomId/storage", endpoint(async (req, res) => {
+  const room = await rooms.roomForUser(id.parse(req.params.roomId), req.serverId!, req.userId!);
+  res.json(await storage.userStorageSnapshot(room.id, req.userId!));
+}));
+campRouter.get("/rooms/:roomId/storage-operations/:operationId", endpoint(async (req, res) => {
+  const room = await rooms.roomForUser(id.parse(req.params.roomId), req.serverId!, req.userId!);
+  res.json(await storage.userStorageOperation(room.id, id.parse(req.params.operationId), req.userId!));
+}));
+campRouter.post("/rooms/:roomId/storage-operations", endpoint(async (req, res) => {
+  const room = await rooms.roomForUser(id.parse(req.params.roomId), req.serverId!, req.userId!);
+  const body = z.object({ requestId: id, kind: z.enum(["backup", "migration"]), expectedEpoch: z.number().int().positive(), expectedAcceptedRevision: z.number().int().positive(), backupOperationId: id.optional() }).strict().parse(req.body);
+  const result = await storage.createStorageOperation(room.id, req.userId!, body);
+  await emitState(req, room.id); res.status(201).json(result);
+}));
+campRouter.post("/rooms/:roomId/storage-operations/:operationId/activate", endpoint(async (req, res) => {
+  const room = await rooms.roomForUser(id.parse(req.params.roomId), req.serverId!, req.userId!);
+  const body = z.object({ expectedEpoch: z.number().int().positive(), expectedTargetStorageId: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(req.body);
+  const result = await storage.activateStorage(room.id, id.parse(req.params.operationId), req.userId!, body.expectedEpoch, body.expectedTargetStorageId);
+  await emitState(req, room.id); res.json(result);
+}));
+campRouter.post("/rooms/:roomId/storage-operations/:operationId/cancel", endpoint(async (req, res) => {
+  const room = await rooms.roomForUser(id.parse(req.params.roomId), req.serverId!, req.userId!);
+  z.object({}).strict().parse(req.body ?? {});
+  const result = await storage.cancelStorage(room.id, id.parse(req.params.operationId), req.userId!);
+  await emitState(req, room.id); res.json(result);
+}));
 campRouter.get("/rooms/:roomId/goals/:goalId/versions", endpoint(async (req, res) => {
   const room = await rooms.roomForUser(id.parse(req.params.roomId), req.serverId!, req.userId!);
   res.json(await goalVersions(room.id, id.parse(req.params.goalId)));
@@ -192,6 +219,17 @@ campWorkerRouter.post("/preflight", endpoint(async (req, res) => {
     if (room) io.to(`channel:${room.channelId}`).emit("camp:updated", { roomId: observation.roomId });
   }
   res.json(observation);
+}));
+campWorkerRouter.get("/storage-operations/:operationId", endpoint(async (req, res) => {
+  res.json(await storage.readWorkerStorageOperation(principal(res), id.parse(req.params.operationId)));
+}));
+campWorkerRouter.post("/storage-operations/:operationId/backup", endpoint(async (req, res) => {
+  const result = await storage.recordStorageBackup(principal(res), id.parse(req.params.operationId), req.body);
+  await emitState(req, principal(res).roomId); res.json(result);
+}));
+campWorkerRouter.post("/storage-operations/:operationId/restore", endpoint(async (req, res) => {
+  const result = await storage.recordStorageRestore(principal(res), id.parse(req.params.operationId), req.body);
+  await emitState(req, principal(res).roomId); res.json(result);
 }));
 campWorkerRouter.post("/claim", endpoint(async (req, res) => {
   const body = leaseInput.omit({ epoch: true }).extend({ claimId: id.optional(), runToken: z.string().regex(/^camp_run_[A-Za-z0-9_-]{32,128}$/).optional(), protocol: z.unknown().optional(), restoreOnly: z.boolean().optional() }).strict().refine(value => Boolean(value.claimId) === Boolean(value.runToken), "claimId and runToken must be supplied together").refine(value => !value.restoreOnly || Boolean(value.claimId), "restoreOnly requires claimId and runToken").parse(req.body);

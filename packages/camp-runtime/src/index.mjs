@@ -5,15 +5,16 @@ import { copyFile, chmod, mkdir, readFile, writeFile, access, realpath } from 'n
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stageSource } from './source-snapshot.mjs';
-import { atomicJson, acquireWorkerLock, privateDirectory } from './durable-state.mjs';
-import { tmpdir } from 'node:os';
+import { atomicJson, privateDirectory } from './durable-state.mjs';
 import { checkedCandidate, projectIdentity } from './candidate.mjs';
 import { quiesceAgentScript } from './quiesce-agent.mjs';
 import { packPlugin } from './plugin-package.mjs';
 import { cleanupAttemptScratch } from './attempt-scratch.mjs';
 import { archiveSession as archiveSessionEvidence } from './session-archive.mjs';
-import { defaultBundle, bundlePaths, loadToolchain } from './toolchain.mjs';
+import { defaultBundle, bundlePaths, loadToolchain, regularBytes } from './toolchain.mjs';
 import { resourcePolicy, checkedResourcePolicy, enforceAgentPolicy } from './resource-policy.mjs';
+import { validateRestoreBinding } from './restore-binding.mjs';
+import { acquireProjectLock } from './project-lock.mjs';
 
 const execute = promisify(execFile);
 const PACKAGE = fileURLToPath(new URL('..', import.meta.url));
@@ -23,8 +24,9 @@ const nameOf = value => `p-${short(value)}`;
 const exists = path => access(path).then(() => true, () => false);
 const json = path => readFile(path, 'utf8').then(JSON.parse);
 const save = atomicJson;
-async function assertProjectIdentity(project, source, imageId) {
-  if (source && project.sourcePath !== await realpath(source)) throw new Error('Project source identity differs from its installed Store');
+async function assertProjectIdentity(project, source, imageId, runtimeHome) {
+  if (project.restore) await validateRestoreBinding(project, runtimeHome);
+  else if (source && project.sourcePath !== await realpath(source)) throw new Error('Project source identity differs from its installed Store');
   if (project.imageId !== imageId) throw new Error('Project runtime image differs from its recorded deployment');
 }
 
@@ -75,7 +77,12 @@ export class CampRuntime {
   async loadProject(projectId, { roomId } = {}) {
     if (!projectIdentity.test(projectId ?? '')) throw new Error('Invalid local project identity');
     const project = await json(join(this.home, 'projects', projectId, 'project.json'));
-    if (project.projectId !== projectId || project.volume !== `camp-mvp-${projectId}` || (roomId && project.externalId !== `room:${roomId}`)) throw new Error('Export project is not the requested room project');
+    if (project.projectId !== projectId || (!project.restore && project.volume !== `camp-mvp-${projectId}`) || (roomId && project.externalId !== `room:${roomId}`)) throw new Error('Export project is not the requested room project');
+    if (project.restore) {
+      await validateRestoreBinding(project, this.home);
+      const mountpoint = (await this.dockerCall(['volume', 'inspect', '--format', '{{.Mountpoint}}', project.volume])).stdout.trim();
+      if (!mountpoint || project.storePath !== join(mountpoint, 'global/store.sqlite')) throw new Error('Restored Store differs from its controlled Docker volume');
+    }
     return project;
   }
 
@@ -127,8 +134,7 @@ export class CampRuntime {
     const externalId = projectId ?? name;
     if (!externalId) throw new Error('projectId is required');
     await this.ready();
-    const dockerHost = await realpath(this.docker);
-    const lock = await acquireWorkerLock(`project:${dockerHost}:${nameOf(externalId)}`, { root: join(tmpdir(), `camp-project-locks-${process.getuid()}`), waitMs: 110_000, signal });
+    const lock = await acquireProjectLock(this, nameOf(externalId), { waitMs: 110_000, signal });
     try { signal?.throwIfAborted(); return await this.prepareProjectExclusive({ externalId, sourcePath, repoPath, signal }); }
     finally { await lock.release(); }
   }
@@ -138,17 +144,23 @@ export class CampRuntime {
     const id = nameOf(externalId);
     if (this.projects.has(id)) {
       const project = this.projects.get(id);
-      await assertProjectIdentity(project, sourcePath ?? repoPath, this.imageId);
+      await assertProjectIdentity(project, sourcePath ?? repoPath, this.imageId, this.home);
       return project;
     }
     const folder = join(this.home, 'projects', id);
     await mkdir(folder, { recursive: true, mode: 0o700 });
     const record = join(folder, 'project.json');
     if (await exists(record)) {
-      const project = await json(record);
-      await assertProjectIdentity(project, sourcePath ?? repoPath, this.imageId);
+      const project = await this.loadProject(id);
+      if (project.externalId !== externalId) throw new Error('Project external identity differs from its installed Store');
+      await assertProjectIdentity(project, sourcePath ?? repoPath, this.imageId, this.home);
       this.projects.set(id, project);
       return project;
+    }
+    const restoreIntent = join(this.home, 'restore-intent.json');
+    if (await exists(restoreIntent)) {
+      const intent = JSON.parse(await regularBytes(restoreIntent, 65536));
+      if (!projectIdentity.test(intent.projectId ?? '') || intent.projectId === id) throw new Error('Restored Store installation is incomplete; inspect its retained intent before importing or running this project');
     }
     const volume = `camp-mvp-${id}`;
     const existingVolume = (await this.dockerCall(['volume', 'ls', '--filter', `name=^${volume}$`, '--format', '{{.Name}}'], { signal })).stdout.trim();

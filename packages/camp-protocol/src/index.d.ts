@@ -1,4 +1,12 @@
 // Generated from index.js by scripts/declarations.mjs. Do not edit.
+/** @param {unknown} value @returns {CampStoragePlan} */
+export function parseStoragePlan(value: unknown): CampStoragePlan;
+/** @param {unknown} value @returns {string} */
+export function serializeStoragePlan(value: unknown): string;
+/** @param {unknown} value @returns {CampStorageBackupReceipt} */
+export function parseStorageBackupReceipt(value: unknown): CampStorageBackupReceipt;
+/** @param {unknown} value @returns {CampStorageRestoreReceipt} */
+export function parseStorageRestoreReceipt(value: unknown): CampStorageRestoreReceipt;
 /** @param {unknown} value @returns {CampVerificationPolicy} */
 export function parseVerificationPolicy(value: unknown): CampVerificationPolicy;
 /** Fixed field order is the input to a trusted caller's SHA-256; no crypto or
@@ -148,6 +156,16 @@ export const DEFAULT_BUDGETS: Readonly<{
         maxDurationSeconds: 3600;
     }>;
 }>;
+/** Operator-only storage contracts are separate from model tools and execution
+ * negotiation. Their receipts carry identities, never host paths or secrets. */
+export const CAMP_STORAGE_LIMITS: Readonly<{
+    maxCandidates: 4096;
+    maxPlanBytes: number;
+    maxStoreBytes: number;
+}>;
+/** @typedef {{schemaVersion:1,operationId:string,roomId:string,kind:'backup'|'migration',storageEpoch:number,sourceStorageId:string,acceptedRevision:number,acceptedCandidate:CampCandidate,projectId:string,candidates:CampCandidate[],backupOperationId?:string}} CampStoragePlan */
+/** @typedef {{schemaVersion:1,operationId:string,manifestDigest:string,storeSha256:string,bytes:number,toolchainDigest:string,imageId:string,candidateCount:number,sourceStorageId:string,stopped:true,verified:true}} CampStorageBackupReceipt */
+/** @typedef {CampStorageBackupReceipt & {targetStorageId:string,verifiedCandidates:number,historyVerified:true}} CampStorageRestoreReceipt */
 export class CampProtocolError extends Error {
     /** @param {string} code @param {string} message @param {number} [status] */
     constructor(code: string, message: string, status?: number);
@@ -173,6 +191,37 @@ export const CAMP_TOOL_SCHEMAS: Readonly<{
     camp_finalize: Record<string, any>;
     camp_review: Record<string, any>;
 }>;
+export type CampStoragePlan = {
+    schemaVersion: 1;
+    operationId: string;
+    roomId: string;
+    kind: "backup" | "migration";
+    storageEpoch: number;
+    sourceStorageId: string;
+    acceptedRevision: number;
+    acceptedCandidate: CampCandidate;
+    projectId: string;
+    candidates: CampCandidate[];
+    backupOperationId?: string;
+};
+export type CampStorageBackupReceipt = {
+    schemaVersion: 1;
+    operationId: string;
+    manifestDigest: string;
+    storeSha256: string;
+    bytes: number;
+    toolchainDigest: string;
+    imageId: string;
+    candidateCount: number;
+    sourceStorageId: string;
+    stopped: true;
+    verified: true;
+};
+export type CampStorageRestoreReceipt = CampStorageBackupReceipt & {
+    targetStorageId: string;
+    verifiedCandidates: number;
+    historyVerified: true;
+};
 export type CampRole = (typeof CAMP_ROLES)[number];
 export type CampTaskKind = (typeof CAMP_TASK_KINDS)[number];
 export type CampAgentTaskKind = (typeof CAMP_AGENT_TASK_KINDS)[number];
@@ -520,5 +569,5 @@ export type CampExecutionPool = {
 };
 export type CampClaimAdmission = {
     status: "waiting";
-    reason: "lane_busy" | "room_capacity" | "role_busy" | "cleanup_pending" | "system_operation_busy";
+    reason: "lane_busy" | "room_capacity" | "role_busy" | "cleanup_pending" | "system_operation_busy" | "storage_maintenance";
 };

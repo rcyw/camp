@@ -1,3 +1,4 @@
+import { activeStorageOperation } from "./storage";
 import { CAMP_PROTOCOL_VERSION, CAMP_SUPPORTED_PROTOCOL_VERSIONS, checkWorkerCompatibility, getTaskRequirements, parseChangeSet, parseWorkerDeclaration, type CampWorkerDeclaration, type CampTaskRequirements, type CampWorkerCompatibility, type CampClaimAdmission } from "../../../../camp-protocol/src/index.js";
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, sql } from "drizzle-orm";
@@ -6,7 +7,7 @@ import { agents, campEvents, campFinalizations, campGoals, campOperations, campQ
 import { createMessage } from "../messageService";
 import { checkedVerificationReport, finishVerification, requireVerificationGate } from "./verification";
 import { checkedIntegrationReport, finishIntegration } from "./integration";
-import { pinExecutionPool, poolCompatibility, roomOccupancy } from "./executionPool";
+import { physicalPoolCompatibility, pinExecutionPool, poolCompatibility, roomOccupancy } from "./executionPool";
 import { observeWorker } from "./workerCompatibility";
 import { withCampTaskMutation } from "./taskAuthority";
 import { assignTask, createTasks, forceUpdateTaskStatus, updateTaskStatus } from "../taskService";
@@ -180,6 +181,7 @@ export async function roleAvailable(tx: DatabaseExecutor, room: Room, agentId: s
 /** Caller owns the room row lock. Both claims and the server-owned sweeper use
  * this same transition, so recovery does not depend on a worker polling. */
 export async function reconcileCampRoom(tx: DatabaseExecutor, room: Room) {
+  if (await activeStorageOperation(tx, room.id)) return;
   const channel = await lockRoomChannel(tx, room);
   await lockRoomTaskIdentities(tx, room);
   let goals = await tx.select().from(campGoals).where(eq(campGoals.roomId, room.id));
@@ -283,7 +285,12 @@ export async function claimRunDetailed(principal: CampPrincipal, workerId: strin
       }
     }
     if (restoreOnly) return { run: null, unbound: true };
+    if (await activeStorageOperation(tx, room.id)) return { run: null, compatibility: null, requirements: null, admission: { status: "waiting", reason: "storage_maintenance" } };
     const protocol = declaration === undefined ? null : parseWorkerDeclaration(declaration);
+    if (room.storageId) {
+      const compatibility = physicalPoolCompatibility(room, workerId, protocol, { status: "compatible", code: "compatible", protocolVersion: null, missingTaskKinds: [], missingRefKinds: [], missingCapabilities: [] });
+      if (compatibility.status === "incompatible") return { run: null, compatibility, requirements: null };
+    }
     await lockRoom(tx, room.id);
     await reconcileCampRoom(tx, room);
     let incompatibility: CampWorkerCompatibility | null = null;

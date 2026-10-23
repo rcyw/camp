@@ -1,3 +1,4 @@
+import { assertStorageWritable } from "./storage";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, inArray } from "drizzle-orm";
@@ -30,6 +31,7 @@ export function policySnapshot(value: unknown): CampVerificationPolicySnapshot {
 export async function setVerificationPolicy(roomId: string, userId: string, value: unknown | null, expectedDigest?: string | null) {
   const snapshot = value === null ? null : policySnapshot(value);
   return withCampRoomAdmin(roomId, userId, async (tx, room) => {
+    await assertStorageWritable(tx, room.id);
     if (expectedDigest !== undefined && expectedDigest !== (room.verificationPolicy?.digest ?? null)) throw new CampError(409, "verification_policy_changed", "The verification policy changed; refresh before saving your draft");
     await tx.update(campRooms).set({ verificationPolicy: snapshot }).where(eq(campRooms.id, room.id));
     return snapshot;

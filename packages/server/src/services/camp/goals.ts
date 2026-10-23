@@ -1,3 +1,4 @@
+import { activeStorageOperation, assertStorageWritable } from "./storage";
 import { roomOccupancy } from "./executionPool";
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import { getDb, type DatabaseExecutor } from "../../db/index";
@@ -111,6 +112,7 @@ export async function goalSnapshots(roomId: string, administrator: boolean, canP
     .where(and(eq(campRuns.roomId, roomId), eq(campRuns.status, "running")));
   const [room] = await getDb().select().from(campRooms).where(eq(campRooms.id, roomId));
   const cleanupPending = (await roomOccupancy(getDb(), roomId)).some(run => run.status !== "running");
+  const maintenance = Boolean(await activeStorageOperation(getDb(), roomId));
   const byAttempt = new Map<string, Awaited<ReturnType<typeof operationSnapshots>>>();
   for (const operation of operations ?? await operationSnapshots(roomId)) {
     const key = `${operation.goalId}:${operation.goalAttempt}`;
@@ -124,7 +126,7 @@ export async function goalSnapshots(roomId: string, administrator: boolean, canP
     const verification = await goalVerificationSnapshot(goal, goalOperations);
     const resultReady = await deliveryResultReady(goal, goalOperations);
     return { ...goal, verification, integration: await goalIntegrationSnapshot(goal, goalOperations), resultReady, ...await goalDeliverySnapshot(goal, canPost), usage: { runs: goal.runCount, reviewRounds: goal.reviewRounds, elapsedSeconds }, activeRuns,
-      canRetry: administrator && !cleanupPending && !goal.integrationInspectionRequired && goal.reason !== "integration_inspection_required" && goal.attempt < 100 && activeRuns === 0 && !otherActive && (goal.workflow !== "serial" || goal.baseHeadRevision === room.acceptedRevision) && ["needs_attention", "cancelled"].includes(goal.status),
+      canRetry: administrator && !maintenance && (!goal.executionPool || goal.executionPool.storageId === room.storageId) && !cleanupPending && !goal.integrationInspectionRequired && goal.reason !== "integration_inspection_required" && goal.attempt < 100 && activeRuns === 0 && !otherActive && (goal.workflow !== "serial" || goal.baseHeadRevision === room.acceptedRevision) && ["needs_attention", "cancelled"].includes(goal.status),
       canCancel: administrator && ["queued", "running", "waiting_question"].includes(goal.status) };
   }));
 }
@@ -132,8 +134,10 @@ export async function goalSnapshots(roomId: string, administrator: boolean, canP
 export async function retryGoal(roomId: string, goalId: string, userId: string, expectedAttempt: number, budget?: Partial<CampBudget>) {
   const { withCampRoomAdmin } = await import("./rooms");
   return withCampRoomAdmin(roomId, userId, async (tx, room) => {
+    await assertStorageWritable(tx, room.id);
     const [goal] = await tx.select().from(campGoals).where(and(eq(campGoals.id, goalId), eq(campGoals.roomId, roomId))).for("update");
     if (!goal) throw new CampError(404, "goal_not_found", "Goal not found");
+    if (goal.executionPool && goal.executionPool.storageId !== room.storageId) throw new CampError(409, "storage_changed", "This goal is frozen to a previous storage pool; submit a new goal from the restored accepted head");
     if (goal.attempt !== expectedAttempt) throw new CampError(409, "goal_attempt_changed", "The goal attempt changed; refresh before retrying");
     if (goal.integrationInspectionRequired || goal.reason === "integration_inspection_required") throw new CampError(409, "integration_inspection_required", "Inspect the unresolved native integration before attempting any recovery; this goal cannot be retried automatically or manually");
     if (goal.attempt >= 100) throw new CampError(409, "goal_attempt_limit", "This goal reached its 100 manual attempt limit; retain its history and submit a new goal");

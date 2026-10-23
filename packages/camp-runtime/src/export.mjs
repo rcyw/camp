@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { CampRuntime } from './index.mjs';
 import { checkedCandidate, checkedManifest } from './candidate.mjs';
 import { receiveSnapshot, removeOwnedDirectory } from './safe-export.mjs';
+import { acquireProjectLock } from './project-lock.mjs';
 
 const inside = (parent, child) => { const path = relative(parent, child); return path === '' || (!path.startsWith('../') && path !== '..'); };
 function finished(child) {
@@ -18,8 +19,13 @@ export async function exportCandidate({ runtime, candidate, roomId, goalId, outp
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) throw new Error('CAMP_EXPORT_TIMEOUT_MS must be a positive bounded integer');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error('Export wall-clock deadline exceeded')), timeoutMs);
-  try { return await performExport({ runtime, candidate, roomId, goalId, output, archive, maxBytes, maxEntries, signal: controller.signal }); }
-  finally { clearTimeout(timer); }
+  let lock;
+  try {
+    // Private materializations use performExport directly under their active
+    // manager. Public exports must also exclude cold Store maintenance.
+    if (runtime instanceof CampRuntime) lock = await acquireProjectLock(runtime, checkedCandidate(candidate).projectId, { signal: controller.signal, onLost: error => controller.abort(error) });
+    return await performExport({ runtime, candidate, roomId, goalId, output, archive, maxBytes, maxEntries, signal: controller.signal });
+  } finally { clearTimeout(timer); await lock?.release(); }
 }
 /** Private bounded materialization. Its opaque links are never followed on the host. */
 export async function materializeCandidate({ runtime, candidate, ownerRun, output, signal, maxBytes = 512 * 1024 ** 2, maxEntries = 20000 }) {

@@ -353,6 +353,120 @@ The destination must be new, with a canonical existing parent, outside runtime s
 
 Export starts a dedicated short-lived LayerFS sandbox without DSH, provider keys, run credentials or runtime-home mounts. It executes trusted streaming code, never code imported from the workspace. `CAMP_EXPORT_TIMEOUT_MS` defaults to 120000 and covers the operation; on timeout only that export attempt is stopped, and partial owned outputs are removed. Uncertain native LayerFS outcomes retain their diagnostics and are not blindly retried. Known-path import filtering does not detect arbitrary secrets in user source: exported candidates contain the selected workspace files, so choose and review source accordingly.
 
+## Private whole-Store backup and restore
+
+Directory/tar export contains workspace files. It cannot restore original
+Layer/Commit identities, branch ancestry, a merge's second parent or the
+private Store binding. Native storage maintenance instead copies the complete
+project SQLite Store and its exact private `project.record`. It includes
+unaccepted branches and deleted historical content. Treat the directory as a
+private authority-bearing backup, not a public artifact. Storage encryption,
+remote upload, retention and automatic backup scheduling remain operator work.
+
+Create a backup or migration operation in the Room first, stop its worker/pool
+and other direct SDK clients, then run on the source Linux storage host:
+
+```sh
+node --env-file=.camp/storage-source.env \
+  packages/camp-runtime/scripts/storage.mjs backup --operation OPERATION_UUID
+```
+
+The environment selects `CAMP_API_URL`, `CAMP_WORKER_TOKEN`,
+`CAMP_RUNTIME_HOME`, the original `CAMP_TOOLCHAIN_BUNDLE` and exact
+`CAMP_RUNTIME_IMAGE`, plus a new `CAMP_STORAGE_BUNDLE` directory outside the
+runtime home. Bundle and home may not contain one another. The CLI takes no
+API-supplied host paths or volume names. It acquires the same host manager and
+project locks as execution, refuses physical containers using the volume and
+unsettled local claims/outboxes/inspection, then holds the Store's directory
+writer lock while SQLite's backup API copies a consistent read snapshot.
+The closed result retains LayerFS's required WAL header, with all committed
+pages in the standalone database. Copying a live main file or separately
+copying its WAL/SHM files is not this backup operation.
+
+The directory contains exactly `manifest.json`, `store.sqlite` and
+`project.record`. The manifest binds the operation's full candidate inventory,
+Room/storage epoch and accepted revision, pinned image/toolchain, byte lengths,
+SHA-256 hashes and SQLite schema/whole-table fingerprint. Candidate validation
+resolves every recorded immutable ref/root through the pinned SDK. Complete
+schema and row fingerprints plus SQLite integrity checks verify history
+preservation; they do not rehash every file in every historical branch.
+Files and directory entries are synced before atomic bundle publication. A
+partial directory is retained after interruption and is never a ready bundle.
+
+If publication succeeded but the source receipt was not acknowledged, even
+loss of the original source host does not require fabricating another backup.
+On a trusted compatible operator host, select the original bundle and an empty
+local runtime home, then run:
+
+```sh
+node --env-file=.camp/storage-recovery.env \
+  packages/camp-runtime/scripts/storage.mjs report-backup --operation OPERATION_UUID
+```
+
+This validates the immutable plan, complete SQLite history and every candidate
+through the native SDK on a private temporary copy, removes that copy, and
+submits the original receipt. It does not reconstruct or assume a current
+source installation and never changes the bundle. Report the original
+operation before creating a migration that reuses a prior completed backup.
+
+To restore a migration, transfer that private directory unchanged to the
+destination Linux host, select an entirely new runtime home and run:
+
+```sh
+node --env-file=.camp/storage-target.env \
+  packages/camp-runtime/scripts/storage.mjs restore --operation OPERATION_UUID
+```
+
+The destination must have the same pinned toolchain and image. It verifies the
+bundle against the control side's immutable source receipt before allocating
+a fresh controlled Docker volume, then verifies all candidates and complete
+database history again. It preserves logical project/ref/root identities and
+the private record, while generating a fresh physical storage identity.
+Journals, pool identities, leases, sessions, model credentials and worker
+tokens are never copied. Restored project binding permits execution and export
+without the old source checkout. The Store, record and binding are synced
+before the final `project.json` admission mapping is published. Failure retains
+the restore intent and owned volume for inspection; ordinary initialization
+cannot silently replace that incomplete installation.
+
+A successful restore reports a receipt but never activates the Room or starts
+a worker. Activation remains an explicit control-side CAS operation after the
+source is stopped. A previously completed backup is reusable only through a
+new migration explicitly bound to that backup operation and the unchanged
+accepted revision/candidate and complete inventory. A placement-only migration
+does not invalidate that logical snapshot: a later disaster recovery can reuse
+the old backup with the current epoch/location retained solely for activation
+CAS. The original artifact and source receipt keep their original source
+storage identity. Every restored target differs from both that original source
+and the current active placement. Without an explicit backup origin, all plan
+fields, including epoch and location, remain strict. The original artifact and
+source receipt remain intact.
+Physical storage identity now lives in `storage-identity.json`; an existing
+pool's Store UUID seeds it without changing the old storage ID, and a new
+destination pool consumes the restored deployment's new identity.
+
+These are cold, single-writer migrations between compatible local Linux
+filesystems. They do not make one mutable SQLite Store usable over NFS or
+between kernels. The live Store remains **Disposable**, synchronous=OFF;
+process-crash recovery and a synced backup do not establish live Store
+durability across power loss or recover writes already lost before backup.
+Native maintenance subprocesses have bounded deadlines and parent-death
+termination. Repeating an acknowledged operation reuses the same verified
+bundle/receipt; an unknown partial installation fails closed. An unactivated
+restore replay also requires the existing physical identity and original
+whole-history fingerprint. Moving its home to another daemon, removing its
+identity or modifying that Store does not produce another successful restore
+receipt. The CLI rejects already known cancelled/unprepared restore phases
+before touching native storage. An acknowledged backup/restore can replay
+only its original existing artifact/installation; it cannot allocate a second
+target or silently generate another backup.
+
+Zero-model storage regressions:
+
+```sh
+node --test packages/camp-runtime/scripts/native-store.test.mjs
+```
+
 ## Verification and recovery limits
 
 ```sh

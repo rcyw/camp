@@ -10,6 +10,7 @@ import { resourcePolicy } from './resource-policy.mjs';
 import { acquireHostManager, admitPoolHost, attemptContainers, PoolAdmission, poolResources, managerFailure } from './host-manager.mjs';
 import { openPoolState, loadPoolState, assertPoolConfiguration, checkPoolJournals } from './pool-state.mjs';
 import { parseExecutionPool } from '../../camp-protocol/src/index.js';
+import { openStorageIdentity } from './storage-identity.mjs';
 
 function barrier(count) {
   let arrived = 0, resolveReady, rejectReady;
@@ -95,6 +96,8 @@ export async function startWorkerPool(options = {}) {
       // Check configuration only after all three journals finished recovery.
       policy = resourcePolicy(env);
       assertPoolConfiguration(metadata, { resources: poolResources(policy), policy });
+      const storage = await openStorageIdentity(identity);
+      if (storage.storageId !== executionPool.storageId) throw managerFailure('Pool and physical storage identities differ after recovery', 'camp_pool_identity');
       await (options.admitHost ?? admitPoolHost)({ runtime, policy, resources, facts: manager.facts, env });
       for (const lane of lanes) lane.runtime.resourcePolicy = policy;
       log({ event: 'pool_recovery_ready', poolId: executionPool.poolId, storageId: executionPool.storageId, workerIds: metadata.workerIds, resources });

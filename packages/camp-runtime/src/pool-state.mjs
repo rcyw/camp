@@ -5,6 +5,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { atomicJson, privateDirectory, WorkerJournal, stateKey } from './durable-state.mjs';
 import { managerFailure, storageIdentity } from './host-manager.mjs';
 import { parseExecutionPool } from '../../camp-protocol/src/index.js';
+import { openStorageIdentity } from './storage-identity.mjs';
 
 async function readPrivate(path) {
   let file;
@@ -24,6 +25,8 @@ export async function loadPoolState({ home, apiUrl, baseWorkerId, dockerId }) {
     const expected = storageIdentity(existing.storeId, dockerId);
     if (existing.schemaVersion !== 1 || existing.apiUrl !== apiUrl || existing.baseWorkerId !== baseWorkerId || existing.storageId !== expected || !/^[a-f0-9]{64}$/.test(existing.configurationDigest ?? '') || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(existing.storeId ?? '') || !Array.isArray(existing.workerIds) || existing.workerIds.length !== 2 || existing.workerIds.some((id, index) => id !== `camp-pool-${existing.poolId}-lane-${index + 1}`)) throw managerFailure('Pool identity or Docker host changed; inspect existing state before replacing it', 'camp_pool_identity');
     parseExecutionPool({ poolId: existing.poolId, storageId: existing.storageId, maxParallel: 2, workerIds: existing.workerIds, resources: existing.resources });
+    const identity = await openStorageIdentity({ home, dockerId, create: false });
+    if (identity && identity.storageId !== existing.storageId) throw managerFailure('Pool and Store deployment identities differ', 'camp_pool_identity');
   }
   return existing;
 }
@@ -32,9 +35,16 @@ export function assertPoolConfiguration(metadata, { resources, policy }) {
 }
 export async function openPoolState({ home, apiUrl, baseWorkerId, dockerId, resources, policy }) {
   const existing = await loadPoolState({ home, apiUrl, baseWorkerId, dockerId });
-  if (existing) { assertPoolConfiguration(existing, { resources, policy }); return existing; }
-  const poolId = randomUUID(), storeId = randomUUID();
-  const value = { schemaVersion: 1, poolId, storeId, storageId: storageIdentity(storeId, dockerId), apiUrl, baseWorkerId, workerIds: [1, 2].map(index => `camp-pool-${poolId}-lane-${index}`), configurationDigest: digest({ resources, policy }), resources };
+  if (existing) {
+    assertPoolConfiguration(existing, { resources, policy });
+    await openStorageIdentity({ home, dockerId });
+    return existing;
+  }
+  const poolId = randomUUID();
+  // Validate before creating either durable identity document.
+  parseExecutionPool({ poolId, storageId: '0'.repeat(64), maxParallel: 2, workerIds: [1, 2].map(index => `camp-pool-${poolId}-lane-${index}`), resources });
+  const identity = await openStorageIdentity({ home, dockerId });
+  const value = { schemaVersion: 1, poolId, storeId: identity.storeId, storageId: identity.storageId, apiUrl, baseWorkerId, workerIds: [1, 2].map(index => `camp-pool-${poolId}-lane-${index}`), configurationDigest: digest({ resources, policy }), resources };
   // A bad resource declaration must never poison durable identity before its
   // first negotiation. Existing identities are only read during recovery.
   parseExecutionPool({ poolId, storageId: value.storageId, maxParallel: 2, workerIds: value.workerIds, resources });

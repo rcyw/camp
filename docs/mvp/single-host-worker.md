@@ -130,4 +130,4 @@ node scripts/mvp/deployment-real-smoke.mjs --real-infra
 
 ## 下一阶段
 
-两项同基线候选的可信集成已实现，见 [可信集成](./trusted-integration.md)；下一步开放同存储主机的有界并发，再扩展依赖计划。LayerFS 当前确有三方 merge，但默认 `/.lww` 与 units 可能选择一侧；必须冻结共同基线与双亲，明确约束这些策略，保留 merge intent/result，处理冲突、NameTaken 与未知结局，再对集成候选重新验证、审查和接受。展示用的截断 Diff 不能作为应用补丁。完整接入门槛见 [可信集成设计](./durable-workflows-next.md)。
+两项同基线候选的可信集成和同主机双 lane 有界并发已实现，见 [可信集成](./trusted-integration.md)与[执行池](./bounded-pair-execution.md)。下一步先补候选备份、恢复和存储迁移，再开放依赖计划与跨主机执行，边界见[存储生命周期](./storage-lifecycle.md)。LayerFS 当前确有三方 merge，但默认 `/.lww` 与 units 可能选择一侧；必须冻结共同基线与双亲，明确约束这些策略，保留 merge intent/result，处理冲突、NameTaken 与未知结局，再对集成候选重新验证、审查和接受。展示用的截断 Diff 不能作为应用补丁。完整接入门槛见 [可信集成设计](./durable-workflows-next.md)。

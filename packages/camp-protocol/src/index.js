@@ -29,6 +29,70 @@ export const DEFAULT_CAMP_BUDGET = Object.freeze({ maxRuns: 12, maxReviewRounds:
 export const DEFAULT_SERIAL_CAMP_BUDGET = Object.freeze({ maxRuns: 24, maxReviewRounds: 10, maxDurationSeconds: 3600 });
 export const DEFAULT_BUDGETS = Object.freeze({ legacy: DEFAULT_CAMP_BUDGET, serial: DEFAULT_SERIAL_CAMP_BUDGET });
 
+/** Operator-only storage contracts are separate from model tools and execution
+ * negotiation. Their receipts carry identities, never host paths or secrets. */
+export const CAMP_STORAGE_LIMITS = Object.freeze({ maxCandidates: 4096, maxPlanBytes: 8 * 1024 * 1024, maxStoreBytes: 1024 ** 4 });
+
+/** @param {unknown} value @param {string} field @returns {string} */
+function storageUuid(value, field) {
+  if (typeof value !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value)) throw new CampProtocolError('invalid_storage', `${field} requires a UUID`);
+  return value;
+}
+/** @param {unknown} value @param {string} field @returns {string} */
+function storageHash(value, field) {
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) throw new CampProtocolError('invalid_storage', `${field} requires SHA-256`);
+  return value;
+}
+/** @param {unknown} value @returns {CampStoragePlan} */
+export function parseStoragePlan(value) {
+  const plan = object(value, 'Storage plan');
+  only(plan, ['schemaVersion', 'operationId', 'roomId', 'kind', 'storageEpoch', 'sourceStorageId', 'acceptedRevision', 'acceptedCandidate', 'projectId', 'candidates', 'backupOperationId'], 'Storage plan');
+  if (plan.schemaVersion !== 1 || !['backup', 'migration'].includes(plan.kind) || !Array.isArray(plan.candidates) || plan.candidates.length < 1 || plan.candidates.length > CAMP_STORAGE_LIMITS.maxCandidates) throw new CampProtocolError('invalid_storage', 'Storage maintenance requires a versioned bounded candidate inventory');
+  const operationId = storageUuid(plan.operationId, 'operationId'), roomId = storageUuid(plan.roomId, 'roomId');
+  const backupOperationId = plan.backupOperationId === undefined ? undefined : storageUuid(plan.backupOperationId, 'backupOperationId');
+  if (backupOperationId && (plan.kind !== 'migration' || backupOperationId === operationId)) throw new CampProtocolError('invalid_storage', 'Only migration can reference an earlier backup operation');
+  const storageEpoch = integer(plan.storageEpoch, 'Storage epoch', 2147483647), acceptedRevision = integer(plan.acceptedRevision, 'Accepted revision', 2147483647);
+  if (storageEpoch < 1 || acceptedRevision < 1) throw new CampProtocolError('invalid_storage', 'Storage maintenance requires an installed accepted baseline');
+  const sourceStorageId = storageHash(plan.sourceStorageId, 'sourceStorageId');
+  const acceptedCandidate = parseCandidate(plan.acceptedCandidate, { projectId: plan.projectId });
+  if (plan.projectId !== acceptedCandidate.projectId) throw new CampProtocolError('invalid_storage', 'Storage plan project must match its accepted candidate');
+  const seen = new Set();
+  const candidates = plan.candidates.map(value => {
+    const candidate = parseCandidate(value, { projectId: acceptedCandidate.projectId, imageId: acceptedCandidate.imageId });
+    if (seen.has(candidate.refId)) throw new CampProtocolError('invalid_storage', 'Storage candidate references must be unique');
+    seen.add(candidate.refId);
+    return candidate;
+  });
+  if (!candidates.some(candidate => candidate.refId === acceptedCandidate.refId && candidate.rootId === acceptedCandidate.rootId)) throw new CampProtocolError('invalid_storage', 'Storage inventory must include the accepted candidate');
+  const parsed = { schemaVersion: /** @type {1} */ (1), operationId, roomId, kind: /** @type {'backup'|'migration'} */ (plan.kind), storageEpoch, sourceStorageId, acceptedRevision, acceptedCandidate, projectId: acceptedCandidate.projectId, candidates, ...(backupOperationId ? { backupOperationId } : {}) };
+  if (new TextEncoder().encode(JSON.stringify(parsed)).length > CAMP_STORAGE_LIMITS.maxPlanBytes) throw new CampProtocolError('invalid_storage', 'Storage plan exceeds its byte budget');
+  return parsed;
+}
+/** @param {unknown} value @returns {string} */
+export function serializeStoragePlan(value) { return JSON.stringify(parseStoragePlan(value)); }
+/** @param {unknown} value @returns {CampStorageBackupReceipt} */
+export function parseStorageBackupReceipt(value) {
+  const receipt = object(value, 'Storage backup receipt');
+  only(receipt, ['schemaVersion', 'operationId', 'manifestDigest', 'storeSha256', 'bytes', 'toolchainDigest', 'imageId', 'candidateCount', 'sourceStorageId', 'stopped', 'verified'], 'Storage backup receipt');
+  if (receipt.schemaVersion !== 1 || receipt.stopped !== true || receipt.verified !== true || typeof receipt.imageId !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(receipt.imageId)) throw new CampProtocolError('invalid_storage', 'Backup receipt requires stopped storage, verified content and an exact image');
+  const bytes = integer(receipt.bytes, 'Store bytes', CAMP_STORAGE_LIMITS.maxStoreBytes), candidateCount = integer(receipt.candidateCount, 'Candidate count', CAMP_STORAGE_LIMITS.maxCandidates);
+  if (bytes < 512 || candidateCount < 1) throw new CampProtocolError('invalid_storage', 'Backup must contain a Store and candidates');
+  return { schemaVersion: 1, operationId: storageUuid(receipt.operationId, 'operationId'), manifestDigest: storageHash(receipt.manifestDigest, 'manifestDigest'), storeSha256: storageHash(receipt.storeSha256, 'storeSha256'), bytes, toolchainDigest: storageHash(receipt.toolchainDigest, 'toolchainDigest'), imageId: receipt.imageId, candidateCount, sourceStorageId: storageHash(receipt.sourceStorageId, 'sourceStorageId'), stopped: true, verified: true };
+}
+/** @param {unknown} value @returns {CampStorageRestoreReceipt} */
+export function parseStorageRestoreReceipt(value) {
+  const receipt = object(value, 'Storage restore receipt');
+  const { targetStorageId, verifiedCandidates, historyVerified, ...backup } = receipt;
+  const parsed = parseStorageBackupReceipt(backup);
+  const target = storageHash(targetStorageId, 'targetStorageId');
+  if (target === parsed.sourceStorageId || verifiedCandidates !== parsed.candidateCount || historyVerified !== true) throw new CampProtocolError('invalid_storage', 'Restore requires a distinct location and a fully verified candidate inventory and history');
+  return { ...parsed, targetStorageId: target, verifiedCandidates, historyVerified: true };
+}
+
+/** @typedef {{schemaVersion:1,operationId:string,roomId:string,kind:'backup'|'migration',storageEpoch:number,sourceStorageId:string,acceptedRevision:number,acceptedCandidate:CampCandidate,projectId:string,candidates:CampCandidate[],backupOperationId?:string}} CampStoragePlan */
+/** @typedef {{schemaVersion:1,operationId:string,manifestDigest:string,storeSha256:string,bytes:number,toolchainDigest:string,imageId:string,candidateCount:number,sourceStorageId:string,stopped:true,verified:true}} CampStorageBackupReceipt */
+/** @typedef {CampStorageBackupReceipt & {targetStorageId:string,verifiedCandidates:number,historyVerified:true}} CampStorageRestoreReceipt */
+
 export class CampProtocolError extends Error {
   /** @param {string} code @param {string} message @param {number} [status] */
   constructor(code, message, status = 400) {
@@ -452,4 +516,4 @@ export const CAMP_TOOL_SCHEMAS = Object.freeze({
 
 /** @typedef {{poolId:string,storageId:string,maxParallel:2,workerIds:[string,string]|string[],resources:{maxContainers:4,cpuMillis:number,memoryBytes:number,pidsLimit:number}}} CampExecutionPool */
 
-/** @typedef {{status:'waiting',reason:'lane_busy'|'room_capacity'|'role_busy'|'cleanup_pending'|'system_operation_busy'}} CampClaimAdmission */
+/** @typedef {{status:'waiting',reason:'lane_busy'|'room_capacity'|'role_busy'|'cleanup_pending'|'system_operation_busy'|'storage_maintenance'}} CampClaimAdmission */

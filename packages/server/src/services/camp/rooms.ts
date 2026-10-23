@@ -1,3 +1,4 @@
+import { assertStorageWritable, storageSnapshot } from "./storage";
 import { roomOccupancy } from "./executionPool";
 import { CAMP_PROTOCOL_VERSION } from "../../../../camp-protocol/src/index.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -184,8 +185,9 @@ export async function roomSnapshot(roomId: string, userId?: string) {
   const canSubmit = userId ? await canUserPostToChannel(room.channelId, userId) : false;
   const operations = await operationSnapshots(roomId);
   const goals = await goalSnapshots(roomId, role === "owner" || role === "admin", canSubmit, operations);
-  const roomBusy = (await roomOccupancy(db, roomId)).some(run => run.status !== "running") || goals.some(goal => ["queued", "running", "waiting_question", "cancelling"].includes(goal.status) || goal.activeRuns > 0);
-  return { supportedPlanModes: ["sequential", "same_baseline_pair", "parallel_pair"], setup: await roomSetup(room), operations, canManage: role === "owner" || role === "admin", workers: await workerSnapshots(roomId), room: { ...room, acceptedHead: { revision: room.acceptedRevision, goalId: room.acceptedGoalId, candidate: room.acceptedCandidate } }, goals, canSubmit, roomBusy, defaultBudget: { serial: DEFAULT_SERIAL_CAMP_BUDGET, legacy: DEFAULT_CAMP_BUDGET }, questions: goals.flatMap(goal => goal.questions), tasks: ordered.map(binding => ({ ...byId.get(binding.taskId), ...binding, id: binding.taskId, executionStatus: binding.status, taskStatus: byId.get(binding.taskId)?.status })), runs: publicRuns, events: events.reverse() };
+  const storage = await storageSnapshot(roomId, role === "owner" || role === "admin");
+  const roomBusy = storage.maintenance || (await roomOccupancy(db, roomId)).some(run => run.status !== "running") || goals.some(goal => ["queued", "running", "waiting_question", "cancelling"].includes(goal.status) || goal.activeRuns > 0);
+  return { storage, supportedPlanModes: ["sequential", "same_baseline_pair", "parallel_pair"], setup: await roomSetup(room), operations, canManage: role === "owner" || role === "admin", workers: await workerSnapshots(roomId), room: { ...room, acceptedHead: { revision: room.acceptedRevision, goalId: room.acceptedGoalId, candidate: room.acceptedCandidate } }, goals, canSubmit, roomBusy, defaultBudget: { serial: DEFAULT_SERIAL_CAMP_BUDGET, legacy: DEFAULT_CAMP_BUDGET }, questions: goals.flatMap(goal => goal.questions), tasks: ordered.map(binding => ({ ...byId.get(binding.taskId), ...binding, id: binding.taskId, executionStatus: binding.status, taskStatus: byId.get(binding.taskId)?.status })), runs: publicRuns, events: events.reverse() };
 }
 
 export async function mintWorkerToken(roomId: string, userId: string) {
@@ -210,6 +212,7 @@ export async function createPipeline(roomId: string, userId: string, input: { ti
     await lockActorMembershipRow(tx, scope.serverId, userId);
     const room = await lockRoom(tx, roomId);
     if (!await canUserPostToChannel(room.channelId, userId)) throw new CampError(403, "camp_post_required", "Channel post access is required to submit work");
+    await assertStorageWritable(tx, room.id);
     const selected = input.role ? [input.role] : [...CAMP_ROLES];
     const workflow = input.role ? "legacy" : input.workflow ?? "serial";
     if (["same_baseline_pair", "parallel_pair"].includes(input.planMode ?? "") && workflow !== "serial") throw new CampError(400, "serial_workflow_required", "A same-baseline pair requires the serial workflow");

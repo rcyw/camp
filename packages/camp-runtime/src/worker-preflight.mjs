@@ -66,7 +66,7 @@ export async function inspectWorker({ runtime, env = process.env, request, repor
   }
   try {
     const runChecks = localChecks ?? (await import('./local-doctor.mjs')).runLocalChecks;
-    const local = await runChecks({ runtime, env, sourcePath: setup?.project?.repoPath, protocolVersion });
+    const local = await runChecks({ runtime, env: { ...env, ...(setup?.roomId ? { CAMP_ROOM_ID: setup.roomId } : {}) }, sourcePath: setup?.project?.repoPath, protocolVersion });
     for (const item of local.checks) if (facts.has(item.id) && !['api', 'resource_policy', 'model'].includes(item.id)) facts.set(item.id, item);
     toolchainDigest = local.toolchainDigest ?? null; imageId = local.imageId ?? null;
   } catch { facts.set('toolchain', check('toolchain', 'failed', 'local_checks_failed')); }

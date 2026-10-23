@@ -2689,6 +2689,13 @@
       "when": 1793538000000,
       "tag": "0383_camp_parallel_pair",
       "breakpoints": true
+    },
+    {
+      "idx": 384,
+      "version": "7",
+      "when": 1793638000000,
+      "tag": "0384_camp_storage_maintenance",
+      "breakpoints": true
     }
   ]
 }

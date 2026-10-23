@@ -7,7 +7,7 @@ import { CAMP_ROLES } from "../../../../camp-protocol/src/index.js";
 import type { Channel } from "../../store/channelStore";
 import { useServerPermissions } from "../../hooks/useServerPermissions";
 import { campApi, campError } from "./campApi";
-import type { CampBudget, CampGoal, CampIntegrationOperation, CampPlanMode, CampQuestion, CampSnapshot } from "./campApi";
+import type { CampBudget, CampGoal, CampIntegrationOperation, CampPlanMode, CampQuestion, CampSnapshot, CampStorage } from "./campApi";
 import { CampRoleCard, CampRunResults, CampTaskList } from "./CampRunViews";
 import CampWorkerConnection from "./CampWorkerConnection";
 import CampGoalCard from "./CampGoalCard";
@@ -17,6 +17,7 @@ import CampCandidateReference from "./CampCandidateReference";
 import CampWorkerDiagnostics from "./CampWorkerDiagnostics";
 import CampVerificationPolicyConfig from "./CampVerificationPolicy";
 import CampRoomSetup from "./CampRoomSetup";
+import CampStoragePanel from "./CampStoragePanel";
 
 const EMPTY_QUESTIONS: CampQuestion[] = [];
 
@@ -107,6 +108,13 @@ export default function CampRoomPanel({ channel }: { channel: Channel }) {
   const cancelGoal = useCallback(async (goal: CampGoal) => {
     if (!busy && snapshot) await act(async () => setSnapshot(await campApi.cancelGoal(snapshot.room.id, goal.id)));
   }, [busy, snapshot, act]);
+  const storageAction = useCallback(async (action: () => Promise<CampStorage>) => {
+    const roomId = snapshot?.room.id;
+    return act(async () => {
+      const storage = await action();
+      setSnapshot(current => current && current.room.id === roomId ? { ...current, storage, roomBusy: storage.maintenance || current.roomBusy } : current);
+    });
+  }, [snapshot?.room.id, act]);
   const groupedGoals = useMemo(() => {
     if (!snapshot) return [];
     return (snapshot.goals ?? []).map(goal => {
@@ -168,6 +176,7 @@ export default function CampRoomPanel({ channel }: { channel: Channel }) {
               {CAMP_ROLES.map(role => <CampRoleCard key={role} role={role} runs={snapshot.runs} goals={snapshot.goals} canCancel={canManage} busy={busy} onCancel={cancel} />)}
             </div>
             <CampWorkerDiagnostics workers={snapshot.workers} />
+            <CampStoragePanel roomId={snapshot.room.id} storage={snapshot.storage} acceptedRevision={snapshot.room.acceptedHead?.revision ?? 0} canManage={canManage} busy={busy} onAction={storageAction} />
             {!snapshot.setup && snapshot.room.verificationPolicy !== undefined && <CampVerificationPolicyConfig roomId={snapshot.room.id} current={snapshot.room.verificationPolicy} canManage={canManage} onSaved={refresh} />}
             <section aria-label={t({ id: "camp.room.acceptedVersion" })} className="rounded-xl border border-border-default p-4"><h3 className="text-sm font-medium">{t({ id: "camp.room.acceptedVersion" })}</h3>{snapshot.room.acceptedHead?.candidate ? <><p className="mt-2 text-xs text-foreground-secondary"><CampCandidateReference candidate={snapshot.room.acceptedHead.candidate} /></p><p className="mt-2 text-xs text-foreground-hint">{t({ id: "camp.room.acceptedHelp" })}</p></> : <p className="mt-2 text-xs text-foreground-hint">{t({ id: "camp.room.noAcceptedVersion" })}</p>}</section>
             <CampQuestionInbox roomId={snapshot.room.id} questions={snapshot.questions ?? EMPTY_QUESTIONS} onAnswered={refresh} />

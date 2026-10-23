@@ -7714,10 +7714,35 @@ export const campRooms = pgTable("camp_rooms", {
   reconciledAt: timestamp("reconciled_at", { withTimezone: true }),
   verificationPolicy: jsonb("verification_policy").$type<import("../services/camp/types").CampVerificationPolicySnapshot>(),
   storageId: text("storage_id"),
+  storageEpoch: integer("storage_epoch").notNull().default(1),
   acceptedRevision: integer("accepted_revision").notNull().default(0),
   acceptedGoalId: uuid("accepted_goal_id").references((): AnyPgColumn => campGoals.id, { onDelete: "set null" }),
   acceptedCandidate: jsonb("accepted_candidate").$type<import("../services/camp/types").CampCandidate>(),
-}, t => [uniqueIndex("camp_rooms_channel").on(t.channelId), index("camp_rooms_server").on(t.serverId), check("camp_rooms_storage_id", sql`${t.storageId} IS NULL OR ${t.storageId} ~ '^[a-f0-9]{64}$'`)]);
+}, t => [uniqueIndex("camp_rooms_channel").on(t.channelId), index("camp_rooms_server").on(t.serverId), check("camp_rooms_storage_epoch", sql`${t.storageEpoch} > 0`), check("camp_rooms_storage_id", sql`${t.storageId} IS NULL OR ${t.storageId} ~ '^[a-f0-9]{64}$'`)]);
+
+// Offline maintenance is separate from model execution and goal budgets. Its
+// immutable plan and receipts preserve the original candidate and pool facts.
+export const campStorageOperations = pgTable("camp_storage_operations", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  roomId: uuid("room_id").notNull().references(() => campRooms.id, { onDelete: "cascade" }),
+  requestId: uuid("request_id").notNull(),
+  kind: text("kind", { enum: ["backup", "migration"] }).notNull(),
+  phase: text("phase", { enum: ["prepared", "backup_ready", "restore_ready", "completed", "activated", "cancelled"] }).notNull().default("prepared"),
+  plan: jsonb("plan").$type<import("../services/camp/storageTypes").CampStoragePlan>().notNull(),
+  planDigest: text("plan_digest").notNull(),
+  backupReceipt: jsonb("backup_receipt").$type<import("../services/camp/storageTypes").CampStorageBackupReceipt>(),
+  restoreReceipt: jsonb("restore_receipt").$type<import("../services/camp/storageTypes").CampStorageRestoreReceipt>(),
+  createdByUserId: uuid("created_by_user_id").notNull().references(() => users.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+}, t => [uniqueIndex("camp_storage_operations_request").on(t.roomId, t.requestId),
+  uniqueIndex("camp_storage_operations_active").on(t.roomId).where(sql`${t.phase} IN ('prepared','backup_ready','restore_ready')`),
+  index("camp_storage_operations_room").on(t.roomId, t.createdAt),
+  check("camp_storage_operations_digest", sql`${t.planDigest} ~ '^[a-f0-9]{64}$'`),
+  check("camp_storage_operations_payload", sql`octet_length(${t.plan}::text) <= 8388608 AND (${t.backupReceipt} IS NULL OR octet_length(${t.backupReceipt}::text) <= 8192) AND (${t.restoreReceipt} IS NULL OR octet_length(${t.restoreReceipt}::text) <= 8192)`),
+  check("camp_storage_operations_phase", sql`(${t.kind} = 'backup' AND ${t.phase} IN ('prepared','completed','cancelled')) OR (${t.kind} = 'migration' AND ${t.phase} IN ('prepared','backup_ready','restore_ready','activated','cancelled'))`),
+  check("camp_storage_operations_receipts", sql`${t.phase} = 'cancelled' OR (${t.phase} = 'prepared' AND ${t.backupReceipt} IS NULL AND ${t.restoreReceipt} IS NULL) OR (${t.phase} IN ('completed','backup_ready') AND ${t.backupReceipt} IS NOT NULL AND ${t.restoreReceipt} IS NULL) OR (${t.phase} IN ('restore_ready','activated') AND ${t.backupReceipt} IS NOT NULL AND ${t.restoreReceipt} IS NOT NULL)`)]);
 
 export const campGoals = pgTable("camp_goals", {
   id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),

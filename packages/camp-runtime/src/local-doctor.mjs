@@ -94,6 +94,16 @@ export async function runLocalChecks({ runtime, env = process.env, sourcePath, p
   await check('harnesses', 'harnesses_verified', 'harnesses_invalid', async () => { await loadVerificationHarnesses(env); return env.CAMP_VERIFICATION_HARNESSES ? 'harnesses_verified' : 'harnesses_not_configured'; });
   if (!sourcePath) add('source', 'passed', 'default_seed');
   else await check('source', 'source_readable', 'source_unavailable', async () => {
+    // A verified native restore is an installed Store, not a fresh import.
+    // Its original checkout is intentionally absent on the destination host.
+    if (env.CAMP_ROOM_ID) {
+      const { createHash } = await import('node:crypto');
+      const projectId = `p-${createHash('sha256').update(`room:${env.CAMP_ROOM_ID}`).digest('hex').slice(0, 16)}`;
+      try {
+        const project = await runtime.loadProject(projectId, { roomId: env.CAMP_ROOM_ID });
+        if (project.restore) return 'restored_store_verified';
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
     await access(sourcePath, constants.R_OK | constants.X_OK);
     if (!(await lstat(sourcePath)).isDirectory()) throw new Error('Source must be an ordinary directory');
   });

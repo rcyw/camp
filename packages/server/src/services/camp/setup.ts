@@ -1,3 +1,4 @@
+import { assertStorageWritable } from "./storage";
 import { createHash } from "node:crypto";
 import { and, desc, eq, isNotNull, sql } from "drizzle-orm";
 import { parsePreflightReport, type CampPreflightReport } from "../../../../camp-protocol/src/index.js";
@@ -48,7 +49,7 @@ export async function workerSetup(principal: CampPrincipal) {
     await validateWorker(tx, principal);
     const [room] = await tx.select().from(campRooms).where(eq(campRooms.id, principal.roomId));
     if (!room) throw new CampError(404, "room_not_found", "Room not found");
-    return { roomId: room.id, storageId: room.storageId, acceptedHead: { revision: room.acceptedRevision, goalId: room.acceptedGoalId, candidate: room.acceptedCandidate }, project: room.project, projectDigest: projectDigest(room.project), projectMutable: await mutableProject(tx, room) };
+    return { roomId: room.id, storageId: room.storageId, storageEpoch: room.storageEpoch, acceptedHead: { revision: room.acceptedRevision, goalId: room.acceptedGoalId, candidate: room.acceptedCandidate }, project: room.project, projectDigest: projectDigest(room.project), projectMutable: await mutableProject(tx, room) };
   });
 }
 
@@ -73,6 +74,7 @@ export async function recordWorkerPreflight(principal: CampPrincipal, workerId: 
 
 export async function updateProject(roomId: string, userId: string, project: CampProject, expectedDigest: string) {
   return withCampRoomAdmin(roomId, userId, async (tx, room) => {
+    await assertStorageWritable(tx, room.id);
     if (projectDigest(room.project) !== expectedDigest) throw new CampError(409, "project_changed", "Project configuration changed; refresh before saving");
     if (!await mutableProject(tx, room)) throw new CampError(409, "project_frozen", "Project configuration is immutable after execution history is created");
     await tx.update(campRooms).set({ project }).where(eq(campRooms.id, room.id));

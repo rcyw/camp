@@ -6,6 +6,7 @@ import type {
   CampWorkItem as ProtocolWorkItem, CampWorkerCompatibility, CampWorkerDeclaration, CampWorkflow,
   CampChangeSet, CampOperationStatus, CampVerificationPolicy, CampVerificationPolicySnapshot, CampVerificationReceipt,
   CampPreflightReport, CampPlanMode, CampIntegrationInput, CampIntegrationReceipt, CampExecutionPool,
+  CampStoragePlan, CampStorageBackupReceipt, CampStorageRestoreReceipt,
 } from "../../../../camp-protocol/src/index.js";
 
 // Keep component imports stable while the wire contract has one definition.
@@ -20,6 +21,7 @@ export type {
   CampVerificationPolicy, CampVerificationPolicySnapshot, CampVerificationReceipt,
   CampPreflightReport, CampPreflightCheck, CampPreflightCheckId,
   CampPlanMode, CampIntegrationInput, CampIntegrationReport, CampIntegrationReceipt, CampExecutionPool,
+  CampStoragePlan, CampStorageBackupReceipt, CampStorageRestoreReceipt,
 } from "../../../../camp-protocol/src/index.js";
 export type CampStatus = CampRunStatus;
 export type CampResult = CampResultManifest;
@@ -203,6 +205,36 @@ export interface CampSetup {
   projectMutable: boolean;
   readiness: CampReadiness | null;
 }
+export interface CampStorageOperation {
+  id: string;
+  roomId: string;
+  kind: "backup" | "migration";
+  phase: "prepared" | "backup_ready" | "restore_ready" | "completed" | "activated" | "cancelled";
+  plan: CampStoragePlan;
+  planDigest: string;
+  backupReceipt: CampStorageBackupReceipt | null;
+  restoreReceipt: CampStorageRestoreReceipt | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  canActivate: boolean;
+  canCancel: boolean;
+  originBackupOperationId?: string | null;
+  canRestoreFromBackup: boolean;
+  candidateCount: number;
+  inventoryTruncated: boolean;
+}
+export interface CampStorage {
+  epoch: number;
+  storageId: string | null;
+  maintenance: boolean;
+  activeOperationId: string | null;
+  operations: CampStorageOperation[];
+  operationsTruncated: boolean;
+  canBackup: boolean;
+  canMigrate: boolean;
+  blockers: string[];
+}
 export interface CampSnapshot {
   room: CampRoom;
   /** Optional while a browser reloads across a server migration. */
@@ -216,12 +248,28 @@ export interface CampSnapshot {
   workers?: CampWorkerRecord[];
   operations?: Array<CampVerificationOperation | CampIntegrationOperation>;
   setup?: CampSetup;
+  storage?: CampStorage;
   tasks: CampTask[];
   runs: CampRun[];
   events: Array<{ id: string; seq: number; runId: string | null; type: string; content: string; createdAt: string }>;
 }
 
 export const campApi = {
+  async storage(roomId: string, signal?: AbortSignal): Promise<CampStorage> {
+    return (await api.get<CampStorage>(`/camp/rooms/${roomId}/storage`, { signal })).data;
+  },
+  async storageOperation(roomId: string, operationId: string, signal?: AbortSignal): Promise<CampStorageOperation> {
+    return (await api.get<CampStorageOperation>(`/camp/rooms/${roomId}/storage-operations/${operationId}`, { signal })).data;
+  },
+  async createStorageOperation(roomId: string, input: { requestId: string; kind: CampStorageOperation["kind"]; expectedEpoch: number; expectedAcceptedRevision: number; backupOperationId?: string }): Promise<CampStorage> {
+    return (await api.post<{ operation: CampStorageOperation; storage: CampStorage }>(`/camp/rooms/${roomId}/storage-operations`, input)).data.storage;
+  },
+  async activateStorageOperation(roomId: string, operationId: string, expectedEpoch: number, expectedTargetStorageId: string): Promise<CampStorage> {
+    return (await api.post<{ operation: CampStorageOperation; storage: CampStorage }>(`/camp/rooms/${roomId}/storage-operations/${operationId}/activate`, { expectedEpoch, expectedTargetStorageId })).data.storage;
+  },
+  async cancelStorageOperation(roomId: string, operationId: string): Promise<CampStorage> {
+    return (await api.post<{ operation: CampStorageOperation; storage: CampStorage }>(`/camp/rooms/${roomId}/storage-operations/${operationId}/cancel`, {})).data.storage;
+  },
   async roomForChannel(channelId: string, signal?: AbortSignal): Promise<CampRoom | null> {
     const { data } = await api.get<{ rooms: CampRoom[] }>("/camp/rooms", { params: { channelId }, signal });
     return data.rooms.find(room => room.channelId === channelId) ?? null;

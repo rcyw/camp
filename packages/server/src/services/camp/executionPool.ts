@@ -16,15 +16,21 @@ export async function roomOccupancy(tx: DatabaseExecutor, roomId: string) {
     )
   )`));
 }
-export function poolCompatibility(room: Room, goal: Goal, workerId: string, declaration: CampWorkerDeclaration | null, compatibility: CampWorkerCompatibility): CampWorkerCompatibility {
-  if (goal.protocolVersion !== 4 || compatibility.status !== "compatible") return compatibility;
+/** A registered Store is an authority fence even when no task is ready. */
+export function physicalPoolCompatibility(room: Room, workerId: string, declaration: CampWorkerDeclaration | null, compatibility: CampWorkerCompatibility): CampWorkerCompatibility {
   const pool = declaration?.executionPool;
   const incompatible = (code: CampWorkerCompatibility["code"]): CampWorkerCompatibility => ({ ...compatibility, status: "incompatible", code });
   if (!pool) return incompatible("pool_required");
   if (!pool.workerIds.includes(workerId)) return incompatible("lane_not_registered");
   if (room.storageId && room.storageId !== pool.storageId) return incompatible("storage_mismatch");
-  if (goal.executionPool && serializeExecutionPool(goal.executionPool) !== serializeExecutionPool(pool)) return incompatible("pool_mismatch");
   return compatibility;
+}
+export function poolCompatibility(room: Room, goal: Goal, workerId: string, declaration: CampWorkerDeclaration | null, compatibility: CampWorkerCompatibility): CampWorkerCompatibility {
+  if ((!room.storageId && goal.protocolVersion !== 4) || compatibility.status === "incompatible") return compatibility;
+  const checked = physicalPoolCompatibility(room, workerId, declaration, compatibility);
+  if (checked.status === "incompatible") return checked;
+  if (goal.executionPool && serializeExecutionPool(goal.executionPool) !== serializeExecutionPool(declaration!.executionPool!)) return { ...compatibility, status: "incompatible", code: "pool_mismatch" };
+  return checked;
 }
 /** Called only after all admission checks under the existing Room row lock. */
 export async function pinExecutionPool(tx: DatabaseExecutor, room: Room, goal: Goal, declaration: CampWorkerDeclaration | null) {
