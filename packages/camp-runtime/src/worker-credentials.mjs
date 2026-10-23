@@ -50,7 +50,7 @@ export async function readWorkerCredential(path) {
  * needed: idle polling and active heartbeats both cross this shared boundary.
  * The server owns expiry and the absolute renewal deadline; a stale disk expiry
  * must still be retried because an earlier response could have been lost. */
-export async function managedWorkerCredential({ env = process.env, request, now = () => performance.now(), persist = atomicJson } = {}) {
+export async function managedWorkerCredential({ env = process.env, request, now = () => performance.now(), wallNow = Date.now, persist = atomicJson } = {}) {
   const path = env.CAMP_WORKER_CREDENTIAL_FILE;
   if (!path) {
     if (env.CAMP_WORKER_ROOM_ID !== undefined) throw fail();
@@ -59,9 +59,9 @@ export async function managedWorkerCredential({ env = process.env, request, now 
   if (env.CAMP_WORKER_TOKEN) throw fail();
   const url = new URL(workerApiUrl(env));
   if (url.protocol !== 'https:' && !['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname)) throw fail();
-  let credential = await readWorkerCredential(path), renewal, authenticated = false, renewedAt;
+  let credential = await readWorkerCredential(path), renewal, authenticated = false, renewedAt, renewedAtWall;
   if (env.CAMP_WORKER_ROOM_ID !== undefined && (!uuid.test(env.CAMP_WORKER_ROOM_ID) || credential.roomId !== env.CAMP_WORKER_ROOM_ID)) throw fail();
-  const selectedEnv = { ...env, CAMP_WORKER_TOKEN: credential.token };
+  const selectedEnv = { ...env, CAMP_API_URL: workerApiUrl(env), CAMP_WORKER_TOKEN: credential.token };
   const api = request ?? workerApiRequest(selectedEnv);
   const renew = async () => {
     const next = metadata(await api('/credential/renew', {}));
@@ -74,6 +74,7 @@ export async function managedWorkerCredential({ env = process.env, request, now 
     credential = updated;
     authenticated = true;
     renewedAt = now();
+    renewedAtWall = wallNow();
   };
   const ensureAuthenticated = async () => {
     // The JSON is operator metadata, not proof of the token's Room. Bind it
@@ -81,10 +82,11 @@ export async function managedWorkerCredential({ env = process.env, request, now 
     // including when a newly issued local lease still has its full seven days.
     // A lease capped by renewUntil cannot extend further. Renewing on every
     // request in its last six days would serialize all heartbeats and fsyncs.
-    // A monotonic daily cadence also survives wall-clock corrections. Server
+    // The monotonic cadence survives wall-clock corrections; elapsed wall time
+    // also catches a host suspension while its monotonic clock was paused. Server
     // authentication still rejects an expired/revoked lease on every request.
     const clock = now();
-    if (!authenticated || clock < renewedAt || clock - renewedAt >= renewalIntervalMs) {
+    if (!authenticated || clock < renewedAt || clock - renewedAt >= renewalIntervalMs || wallNow() - renewedAtWall >= renewalIntervalMs) {
       renewal ??= renew().finally(() => { renewal = null; });
       await renewal;
     }

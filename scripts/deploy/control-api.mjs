@@ -33,7 +33,9 @@ User=root
 WorkingDirectory=${escapePath(checkout + '/packages/server')}
 EnvironmentFile=${escapePath(envFile)}
 Environment="CAMP_LISTEN_HOST=127.0.0.1"
-ExecStart=${quotePath(nodePath)} --import @oxc-node/core/register src/server.ts
+# Apply the public bind policy after EnvironmentFile precedence is resolved.
+# env execs Node in the same main PID; no secret is placed in argv.
+ExecStart=/usr/bin/env -u DOTENV_CONFIG_OVERRIDE CAMP_LISTEN_HOST=127.0.0.1 ${quotePath(nodePath)} --import @oxc-node/core/register src/server.ts
 Restart=on-failure
 RestartSec=5s
 KillSignal=SIGTERM

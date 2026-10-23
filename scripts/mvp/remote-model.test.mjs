@@ -27,7 +27,10 @@ test('remote execution pins a reviewed release and stable HTTPS origin with no U
 test('service provenance rejects inline evaluators, injected loaders and once-mode even if argv contains the real entry path', () => {
   const release = '/srv/camp/releases/reviewed', entry = release + '/packages/camp-runtime/scripts/worker-pool.mjs';
   assert.equal(standardModelWorkerCommand(['node', '--env-file=/private/model.env', '--env-file=/private/worker.env', entry], release), true);
-  for (const flag of ['-e', '-eprocess.exit()', '--eval=process.exit()', '--require=/private/injected.cjs', '--import=/private/injected.mjs', '--loader=/private/loader.mjs', '--once']) assert.equal(standardModelWorkerCommand(['node', flag, entry], release), false);
+  for (const flag of ['-e', '-eprocess.exit()', '-p', '-pJSON.stringify({})', '--print', '--print=process.exit()', '--eval=process.exit()', '--require=/private/injected.cjs', '--import=/private/injected.mjs', '--loader=/private/loader.mjs', '--once', '--test', '--inspect', '--env-file-if-exists=/private/missing.env', '--env-file=/private/../other.env', '--env-file=relative', '--env-file=/private/model env', '--env-file=/private/$HOME']) assert.equal(standardModelWorkerCommand(['node', flag, entry], release), false, flag);
+  for (const node of ['/bin/sh', '/usr/bin/../bin/node', '-p', '/private/other']) assert.equal(standardModelWorkerCommand([node, entry], release), false);
+  assert.equal(standardModelWorkerCommand(['/usr/bin/node', '--env-file=/private/model.env', '--env-file=/private/worker.env', entry], release), true);
+  assert.equal(standardModelWorkerCommand(['/usr/bin/node', '--env-file=/private/model.env', '--env-file=/private/model.env', entry], release), false);
   assert.equal(standardModelWorkerCommand(['node', entry, '--once'], release), false);
 });
 async function project() {
@@ -66,6 +69,48 @@ test('external contract refuses added files, links and incorrect behavior', asyn
       else if (kind === 'link') await symlink('foundation/index.js', join(p.folder, 'added-link'));
       else await writeFile(join(p.folder, 'right/index.js'), 'export function slugName(){return "wrong";}');
       await assert.rejects(execute(process.execPath, [p.contract]));
+    } finally { await p.cleanup(); }
+  }
+});
+
+test('candidate success-marker exits, empty exits and trailing output cannot forge a trusted outer verdict', async () => {
+  const correct = 'export function normalizeName(value){if(typeof value!=="string")throw new TypeError("string required");return value.trim().replace(/\\s+/g," ").toLowerCase();}\n';
+  for (const candidate of [
+    'process.stdout.write("CAMP_REMOTE_MODEL_CONTRACT_PASSED\\n");process.exit(0);' + correct,
+    'process.exit(0);' + correct,
+    'process.on("exit",()=>process.stdout.write("CAMP_REMOTE_MODEL_CONTRACT_PASSED\\n"));' + correct,
+  ]) {
+    const p = await project(); try {
+      await writeFile(join(p.folder, 'foundation/index.js'), candidate);
+      await assert.rejects(execute(process.execPath, [p.contract], { timeout: 10000 }), error => error.code === 1 && !error.stdout.includes('CAMP_REMOTE_MODEL_CONTRACT_PASSED'));
+    } finally { await p.cleanup(); }
+  }
+});
+
+test('patching candidate-process assertions cannot bless incorrect observed function values', async () => {
+  const p = await project(); try {
+    await writeFile(join(p.folder, 'foundation/index.js'), 'import assert from"node:assert/strict";for(const name of["equal","deepEqual","throws","ok"])assert[name]=()=>{};export function normalizeName(){return"forged";}\n');
+    await assert.rejects(execute(process.execPath, [p.contract], { timeout: 10000 }), error => error.code === 1 && !error.stdout.includes('CAMP_REMOTE_MODEL_CONTRACT_PASSED'));
+  } finally { await p.cleanup(); }
+});
+
+test('the trusted parent rechecks protected bytes and complete inventory after candidate execution', async () => {
+  const correct = 'export function normalizeName(value){if(typeof value!=="string")throw new TypeError("string required");return value.trim().replace(/\\s+/g," ").toLowerCase();}\n';
+  for (const name of ['index.test.js', 'unexpected.txt']) {
+    const p = await project(); try {
+      await writeFile(join(p.folder, 'foundation/index.js'), 'import{writeFileSync}from"node:fs";writeFileSync(new URL(' + JSON.stringify(name) + ',import.meta.url),"changed during behavior checks");' + correct);
+      await assert.rejects(execute(process.execPath, [p.contract], { timeout: 10000 }), error => error.code === 1 && !error.stdout.includes('CAMP_REMOTE_MODEL_CONTRACT_PASSED'));
+    } finally { await p.cleanup(); }
+  }
+});
+
+test('missing completion and excessive candidate output have hard bounds before the outer process can accept', async () => {
+  for (const candidate of ['export function normalizeName(){while(true){}}', 'process.stdout.write("x".repeat(100000));export function normalizeName(){return"wrong";}']) {
+    const p = await project(); try {
+      await writeFile(join(p.folder, 'foundation/index.js'), candidate);
+      const started = Date.now();
+      await assert.rejects(execute(process.execPath, [p.contract], { timeout: 10000 }), error => error.code === 1 && !error.killed && !error.stdout.includes('CAMP_REMOTE_MODEL_CONTRACT_PASSED'));
+      assert.ok(Date.now() - started < 10000);
     } finally { await p.cleanup(); }
   }
 });

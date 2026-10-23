@@ -72,6 +72,20 @@ inspection. Operators must replace the intermediate before its remaining life
 falls below a leaf's full lifetime and retain a safe copy of the offline root.
 The initial offline directory is root-only on HK; moving it to offline storage
 remains an operator custody task. Daily renewal does not extend issuer lifetime.
+The renewal unit hides that path when present and tolerates its absence after
+offline removal. PKI directories and public trust-anchor files require trusted,
+non-writable parent directories; a root-owned sticky `/tmp` is permitted for
+isolated tests. PEM inputs must be ASCII certificate bytes only. Before skipping
+a healthy-looking leaf, renewal verifies its full issuer chain, IP identity and
+server purpose, including CA path-length constraints. OpenSSL invocations have
+a fixed deadline and expose no private-key command output.
+
+Process-crash tests kill renewal immediately before and after the atomic chain
+rename: the complete previous or replacement chain remains readable, the serving
+key is retained, and the kernel issuer lock is released. These tests cover
+process loss, not a storage power-loss durability claim. Interrupted initial
+publication remains an explicit partial PKI requiring inspection; initialization
+does not replace it.
 
 Nginx preserves socket upgrades and streaming responses. Private artifact parts
 are bounded at 8 MiB; a 10 MiB gateway request limit leaves envelope headroom.
@@ -122,11 +136,17 @@ matches the server's tokenId/roomId with the deployment metadata. Swapping a
 bearer into edited local JSON cannot rebind the Store.
 
 Each credential has a seven-day lease and a 90-day absolute renewal limit.
-Active heartbeats and idle polling share singleflight renewal once a day.
+Active heartbeats and idle polling share singleflight renewal once a day using
+a monotonic clock, including when the remaining lease is capped by the deadline.
+Elapsed wall time also triggers renewal after a suspended host resumes.
 Renewal keeps the same secret/tokenId, rechecks the Room/token locks and
 publishes metadata with file and directory fsync before ordinary API requests
-continue. A lost response is safely retried. Local stale expiry is only a
-renewal hint; the server decides whether the credential remains valid.
+continue. Every process start authenticates again, and a lost response is safely
+retried even if local expiry metadata is stale; the server decides whether the
+credential remains valid. Credential reads reject FIFO files and writable parent
+directories before startup. The standalone doctor, storage, private-artifact and
+Goal export CLIs use the same managed-file authentication and renewal boundary;
+offline exports and local recovery remain independent of API availability.
 Revoked or expired credentials cannot renew. Renewals cannot outlive the
 90-day deadline, issue alternate tokens or grant Run tokens Worker authority.
 
@@ -162,6 +182,11 @@ does not inject role decisions or create another manager. Evidence includes
 API Run/session/candidate facts, real proxy request counters from journal,
 private control reachability, protected files and original Room preservation.
 Success leaves the service, credential and Room active for further work.
+The external behavior probe imports candidate modules only in a bounded child
+process. Its parent validates the complete observation report and file inventory
+before printing success; candidate output or an early zero exit alone cannot
+pass. This does not provide isolation from arbitrary malicious code running
+under the same container UID.
 
 Keep private deployment receipts under ignored `.camp/production` and real model
 receipts under `.camp/remote-model`; publish only the non-secret conclusions.

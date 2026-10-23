@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer, request } from 'node:https';
 import { once } from 'node:events';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { X509Certificate, createPrivateKey } from 'node:crypto';
+import { X509Certificate, createPrivateKey, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { mkdtemp, readFile, rm, stat, symlink, writeFile, readdir, chmod, link, unlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile, readdir, chmod, link, unlink } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initializeControlPki, renewControlCertificate, renderControlDeployment, parseControlArguments } from './control-plane.mjs';
@@ -27,7 +28,7 @@ test('private CA verifies real HTTPS, exact IP SAN and repeatable renewal withou
   await assert.rejects(get({ servername: 'wrong.example' }), { code: 'ERR_TLS_CERT_ALTNAME_INVALID' });
   assert.equal((await renewControlCertificate(config)).renewed, false);
   assert.equal((await renewControlCertificate(config, { force: true })).renewed, true);
-  assert.deepEqual(await readFile(join(config.pkiDir, 'server.key')), key);
+  assert.equal(digest(await readFile(join(config.pkiDir, 'server.key'))), digest(key));
   await assert.rejects(initializeControlPki(config, join(folder, 'offline')), /never replaces/);
   const run = { folder, containerId: 'a'.repeat(64) }, calls = [];
   const trust = await installSandboxTrust({ runtime: { dockerCall: async args => calls.push(args) }, run, caFile: join(config.pkiDir, 'root.crt') });
@@ -55,11 +56,12 @@ test('deployment rejects configuration injection and preserves streaming artifac
   for (const input of [{ ...config, publicIp: 'example.com' }, { ...config, pkiDir: '/etc/camp;bad' }, { ...config, apiPort: 443 }, { ...config, apiPort: 15190 }, { ...config, configPath: '/etc/../tmp/config' }, { ...config, webRoot: '/' }, { ...config, nodePath: '/' }, { ...config, unexpected: true }]) assert.throws(() => renderControlDeployment(input));
   const managed = renderControlDeployment({ ...config, webRoot: '/srv/camp/web', rootCaDir: '/offline/camp-root' });
   assert.match(managed['camp-control.conf'], /try_files \$uri \$uri\/ \/index.html/); assert.match(managed['camp-control.conf'], /location ~ \/\\\. \{ deny all; \}/);
-  assert.match(managed['camp-control-certificate.service'], /InaccessiblePaths=\/offline\/camp-root/);
+  assert.match(managed['camp-control-certificate.service'], /InaccessiblePaths=-\/offline\/camp-root/);
   for (const rootCaDir of ['/etc/camp', '/etc/camp/pki/offline', '/opt/camp']) assert.throws(() => renderControlDeployment({ ...config, rootCaDir }));
 });
 
 const execute = promisify(execFile);
+const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const fixtureConfig = folder => ({ publicIp: '127.0.0.1', pkiDir: join(folder, 'pki'), scriptPath: '/opt/camp/control-plane.mjs', nodePath: '/usr/bin/node', configPath: '/etc/camp/control.json' });
 
 test('initialization protects all private keys under umask 000 and concurrent initialization cannot replace a root', async t => {
@@ -130,4 +132,85 @@ test('strict CLI parsing and a real init/renew invocation use the same validatio
   const script = fileURLToPath(new URL('./control-plane.mjs', import.meta.url));
   const initial = await execute(process.execPath, [script, 'init', '--config', file, '--root-ca-dir', join(folder, 'offline')]); assert.equal(JSON.parse(initial.stdout).renewed, true);
   const next = await execute(process.execPath, [script, 'renew', '--config', file]); assert.equal(JSON.parse(next.stdout).renewed, false);
+});
+
+test('a current leaf cannot hide an invalid full-chain root path length policy', async t => {
+  const folder = await mkdtemp(join(tmpdir(), 'camp-tls-constraints-')); t.after(() => rm(folder, { recursive: true, force: true }));
+  const config = fixtureConfig(folder), offline = join(folder, 'offline'); await initializeControlPki(config, offline);
+  const chain = await readFile(join(config.pkiDir, 'server-chain.pem'));
+  // Same root key and subject, valid signatures and dates, but the root now
+  // forbids the online intermediate. Adjacent X509 checks still pass.
+  await execute('openssl', ['req', '-x509', '-new', '-key', join(offline, 'root.key'), '-days', '3650', '-sha256', '-subj', '/CN=Camp Control Root CA', '-addext', 'basicConstraints=critical,CA:TRUE,pathlen:0', '-addext', 'keyUsage=critical,keyCertSign,cRLSign', '-out', join(config.pkiDir, 'root.crt')]);
+  const root = new X509Certificate(await readFile(join(config.pkiDir, 'root.crt'))), issuer = new X509Certificate(await readFile(join(config.pkiDir, 'issuer.crt')));
+  assert.equal(issuer.checkIssued(root) && issuer.verify(root.publicKey), true);
+  await assert.rejects(execute('openssl', ['verify', '-CAfile', join(config.pkiDir, 'root.crt'), '-untrusted', join(config.pkiDir, 'issuer.crt'), join(config.pkiDir, 'server-chain.pem')]), error => /path length constraint exceeded/.test(error.stderr));
+  await assert.rejects(renewControlCertificate(config), { code: 'camp_control_deployment' });
+  assert.deepEqual(await readFile(join(config.pkiDir, 'server-chain.pem')), chain);
+});
+
+test('non-ASCII PEM bytes and invalid inspection clocks fail before any sandbox trust mutation', async t => {
+  const folder = await mkdtemp(join(tmpdir(), 'camp-tls-ascii-')); t.after(() => rm(folder, { recursive: true, force: true }));
+  const config = fixtureConfig(folder); await initializeControlPki(config, join(folder, 'offline'));
+  const ca = await readFile(join(config.pkiDir, 'root.crt')), malformed = Buffer.from(ca); malformed[0] |= 0x80;
+  const file = join(folder, 'malformed.crt'); await writeFile(file, malformed, { mode: 0o644 });
+  const run = { folder: join(folder, 'run'), containerId: 'a'.repeat(64) }; await mkdir(run.folder, { mode: 0o700 });
+  let calls = 0; const runtime = { dockerCall: async () => { calls++; } };
+  await assert.rejects(installSandboxTrust({ runtime, run, caFile: file }), { code: 'camp_control_ca_invalid' });
+  for (const now of [NaN, Infinity, -Infinity]) await assert.rejects(installSandboxTrust({ runtime, run, caFile: join(config.pkiDir, 'root.crt'), now }), { code: 'camp_control_ca_invalid' });
+  assert.equal(calls, 0); await assert.rejects(stat(join(run.folder, 'control-ca.crt')), { code: 'ENOENT' });
+  await writeFile(join(config.pkiDir, 'root.crt'), malformed);
+  await assert.rejects(renewControlCertificate(config), /only ASCII PEM/);
+});
+
+test('moving the offline root out of service custody retains a valid isolated renewal unit', async t => {
+  const folder = await mkdtemp(join(tmpdir(), 'camp-tls-offline-')); t.after(() => rm(folder, { recursive: true, force: true }));
+  const rootCaDir = join(folder, 'offline'), config = { ...fixtureConfig(folder), rootCaDir, scriptPath: fileURLToPath(new URL('control-plane.mjs', import.meta.url)), nodePath: process.execPath };
+  await initializeControlPki(config, rootCaDir); await rm(rootCaDir, { recursive: true });
+  assert.equal((await renewControlCertificate(config, { force: true })).renewed, true, 'Renewal never needs the removed offline key');
+  const rendered = renderControlDeployment(config), unit = rendered['camp-control-certificate.service'];
+  assert.ok(unit.includes('InaccessiblePaths=-' + rootCaDir));
+  const service = join(folder, 'camp-control-certificate.service'); await writeFile(service, unit);
+  await execute('systemd-analyze', ['verify', '--man=no', service], { timeout: 15000 });
+});
+
+test('SIGKILL at either side of publication leaves a complete old or new chain and releases the issuer lock', async t => {
+  const folder = await mkdtemp(join(tmpdir(), 'camp-tls-crash-')); t.after(() => rm(folder, { recursive: true, force: true }));
+  const config = fixtureConfig(folder); await initializeControlPki(config, join(folder, 'offline'));
+  const configFile = join(folder, 'config.json'), chainFile = join(config.pkiDir, 'server-chain.pem'); await writeFile(configFile, JSON.stringify(config));
+  const keyDigest = digest(await readFile(join(config.pkiDir, 'server.key')));
+  const script = String.raw`import fs from 'node:fs';import{syncBuiltinESMExports}from'node:module';
+const[moduleUrl,configFile,marker,phase]=process.argv.slice(1),config=JSON.parse(fs.readFileSync(configFile,'utf8')),original=fs.promises.rename;
+fs.promises.rename=async(source,target)=>{if(target!==config.pkiDir+'/server-chain.pem')return original(source,target);if(phase==='after')await original(source,target);fs.writeFileSync(marker,'ready',{flag:'wx',mode:0o600});setInterval(()=>{},1000);await new Promise(()=>{});};syncBuiltinESMExports();
+await(await import(moduleUrl)).renewControlCertificate(config,{force:true});`;
+  for (const phase of ['before', 'after']) {
+    const previous = await readFile(chainFile), marker = join(folder, phase + '.marker');
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script, new URL('control-plane.mjs', import.meta.url).href, configFile, marker, phase], { stdio: 'ignore' });
+    const closed = once(child, 'close');
+    try {
+      const deadline = Date.now() + 10000;
+      for (;;) {
+        try { await stat(marker); break; } catch (error) { if (error.code !== 'ENOENT') throw error; }
+        assert.equal(child.exitCode, null, 'Publication fault child exited before its owned gate'); assert.ok(Date.now() < deadline); await delay(10);
+      }
+      assert.equal(child.kill('SIGKILL'), true); const [, signal] = await closed; assert.equal(signal, 'SIGKILL');
+      if (phase === 'before') assert.deepEqual(await readFile(chainFile), previous);
+      else assert.notEqual(digest(await readFile(chainFile)), digest(previous));
+      await execute('openssl', ['verify', '-CAfile', join(config.pkiDir, 'root.crt'), '-untrusted', join(config.pkiDir, 'issuer.crt'), '-verify_ip', config.publicIp, '-purpose', 'sslserver', chainFile]);
+      assert.equal((await renewControlCertificate(config)).renewed, false, 'Another invocation can acquire the crashed owner kernel lock');
+      assert.equal(digest(await readFile(join(config.pkiDir, 'server.key'))), keyDigest);
+    } finally { if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await closed; } }
+  }
+});
+
+test('PKI output and public CA inputs reject replaceable parent directories before writing or trusting anything', async t => {
+  const folder = await mkdtemp(join(tmpdir(), 'camp-tls-parent-')); t.after(() => rm(folder, { recursive: true, force: true }));
+  const unsafe = join(folder, 'unsafe'); await mkdir(unsafe); await chmod(unsafe, 0o777);
+  const bad = fixtureConfig(unsafe);
+  await assert.rejects(initializeControlPki(bad, join(folder, 'offline')), /writable or foreign-owned ancestors/);
+  await assert.rejects(stat(bad.pkiDir), { code: 'ENOENT' });
+  const good = fixtureConfig(join(folder, 'safe')); await initializeControlPki(good, join(folder, 'offline'));
+  const file = join(unsafe, 'public-root.crt'); await writeFile(file, await readFile(join(good.pkiDir, 'root.crt')), { mode: 0o644 });
+  let calls = 0;
+  await assert.rejects(installSandboxTrust({ runtime: { dockerCall: async () => { calls++; } }, run: { folder, containerId: 'a'.repeat(64) }, caFile: file }), { code: 'camp_control_ca_invalid' });
+  assert.equal(calls, 0); await assert.rejects(stat(join(folder, 'control-ca.crt')), { code: 'ENOENT' });
 });

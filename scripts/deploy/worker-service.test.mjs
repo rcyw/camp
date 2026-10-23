@@ -3,10 +3,12 @@ import { test } from 'node:test';
 import { mkdtemp, mkdir, readFile, writeFile, rm, chmod, symlink, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
-import { workerServiceConfiguration, renderWorkerService, verifyServiceRelease, validateWorkerService, installWorkerService, operateWorkerService, workerServiceMain } from './worker-service.mjs';
+import { WORKER_ENV_CHECK, workerServiceConfiguration, renderWorkerService, verifyServiceRelease, validateWorkerService, installWorkerService, operateWorkerService, workerServiceMain } from './worker-service.mjs';
 
 const execute = promisify(execFile);
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -24,7 +26,15 @@ async function fixture(t) {
   const manifest = { schemaVersion: 1, kind: 'camp-worker-release', nodeMajor: 24, external: { toolchainDigest: c.toolchainDigest, imageId: c.imageId }, files: [{ path: 'sample.mjs', size: bytes.length, mode: 0o644, sha256: hash(bytes) }] };
   const text = JSON.stringify(manifest);
   await writeFile(join(c.releasePath, 'worker-release.json'), text, { mode: 0o644 }); c.releaseManifestSha256 = hash(text);
-  const calls = [], run = async (command, args) => { calls.push({ command, args }); return { stdout: command === '/usr/bin/docker' ? c.imageId + '\n' : args[0] === '--version' ? 'v24.21.0\n' : args.includes('--property=ActiveState') ? 'inactive\n' : '', stderr: '' }; };
+  const calls = [], run = async (command, args) => {
+    calls.push({ command, args });
+    if (args.includes('--property=FragmentPath,DropInPaths,NeedDaemonReload')) {
+      const unit = join(root, 'units', c.serviceName + '.service');
+      const exists = await stat(unit).then(() => true, () => false);
+      return { stdout: `FragmentPath=${exists ? unit : ''}\nDropInPaths=\nNeedDaemonReload=no\n`, stderr: '' };
+    }
+    return { stdout: command === '/usr/bin/docker' ? c.imageId + '\n' : args[0] === '--version' ? 'v24.21.0\n' : args.includes('--property=ActiveState') ? 'inactive\n' : '', stderr: '' };
+  };
   return { root, c, calls, run, unitDirectory: join(root, 'units') };
 }
 
@@ -47,7 +57,7 @@ test('unit preserves manager lock namespace, credential renewal and durable reco
   assert.match(unit, /PrivateTmp=no/); assert.match(unit, /KillMode=mixed/); assert.match(unit, /TimeoutStopSec=180/); assert.match(unit, /Restart=on-abnormal/);
   assert.match(unit, /User=root/); assert.match(unit, /ReadWritePaths="\/var\/lib\/camp\/worker" "\/etc\/camp\/credential"/);
   assert.match(unit, /Environment=NODE_EXTRA_CA_CERTS=\/etc\/camp\/control-ca.crt/);
-  assert.match(unit, /--env-file=\/etc\/camp\/model.env/); assert.match(unit, /--env-file=\/etc\/camp\/service\/worker.env/);
+  assert.match(unit, /--env-file=\/etc\/camp\/model.env/); assert.match(unit, /--env-file=\/etc\/camp\/service\/worker-[a-f0-9]{64}\.env/);
   assert.match(unit, /verify-worker-release.mjs/); assert.doesNotMatch(unit, /doctor.mjs|@oxc|--import|EnvironmentFile=|insecure-registry/);
   assert.match(environment, /CAMP_WORKER_CREDENTIAL_FILE=\/etc\/camp\/credential\/worker.json/);
   assert.match(environment, /CAMP_WORKER_ROOM_ID=11111111-2222-4333-8444-555555555555/);
@@ -60,7 +70,7 @@ test('unit preserves manager lock namespace, credential renewal and durable reco
 test('all generated-file collisions and duplicate input roles are rejected without overwriting inputs', async t => {
   const c = sample();
   for (const key of ['credentialFile', 'controlCaFile', 'modelEnvFile', 'harnessManifest', 'nodePath']) {
-    for (const name of ['worker.env', 'service-install.json', 'service-operation.lock']) {
+    for (const name of ['worker.env', 'service-install.json', 'service-install.pending.json', 'service-operation.lock', 'worker-' + 'a'.repeat(64) + '.env']) {
       assert.throws(() => renderWorkerService({ ...c, [key]: join(c.configDirectory, name) }), { code: 'camp_worker_service_invalid' });
     }
   }
@@ -73,6 +83,9 @@ test('all generated-file collisions and duplicate input roles are rejected witho
 
 test('CA preflight matches isolated agent trust: one pure self-signed root with a valid self signature', async t => {
   const { c, root, run } = await fixture(t), ca = await readFile(c.controlCaFile);
+  const highBit = Buffer.from(ca); highBit[highBit.indexOf('BEGIN')] |= 128;
+  await writeFile(c.controlCaFile, highBit);
+  await assert.rejects(validateWorkerService(c, { run }), { code: 'camp_worker_service_ca' });
   await writeFile(c.controlCaFile, Buffer.concat([ca, ca]));
   await assert.rejects(validateWorkerService(c, { run }), { code: 'camp_worker_service_ca' });
   await writeFile(c.controlCaFile, Buffer.concat([Buffer.from('not a PEM certificate\n'), ca]));
@@ -84,6 +97,17 @@ test('CA preflight matches isolated agent trust: one pure self-signed root with 
   await execute('openssl', ['x509', '-req', '-in', csr, '-CA', c.controlCaFile, '-CAkey', join(root, 'private/ca.key'), '-set_serial', '2', '-days', '1', '-extfile', extensions, '-out', child]);
   await assert.rejects(validateWorkerService({ ...c, controlCaFile: child }, { run }), { code: 'camp_worker_service_ca' });
   await validateWorkerService(c, { run });
+});
+
+test('the exact systemd pre-start guard rejects generation drift even without the operator CLI', async t => {
+  const { c } = await fixture(t), rendered = renderWorkerService(c), file = rendered.environmentPath;
+  await writeFile(file, rendered.environment, { mode: 0o600 });
+  const check = () => execute(process.execPath, ['-e', WORKER_ENV_CHECK, file, hash(rendered.environment)], { env: { PATH: process.env.PATH }, timeout: 5000 });
+  await check();
+  await writeFile(file, rendered.environment + 'NODE_OPTIONS=--require=/unreviewed/loader\n');
+  await assert.rejects(check(), error => error.code === 1 && error.stdout === '' && error.stderr === '');
+  await writeFile(file, rendered.environment); await chmod(file, 0o644);
+  await assert.rejects(check(), error => error.code === 1 && error.stdout === '' && error.stderr === '');
 });
 
 test('a model environment must supply a nonempty key under the actual Node dotenv parser', async t => {
@@ -144,7 +168,7 @@ test('install is explicit stopped-only, private and repeatable, preserving exist
   const journal = join(c.runtimeHome, 'outbox.json'); await writeFile(journal, '{"immutable":"completion"}\n', { mode: 0o600 });
   const result = await installWorkerService(c, { run, unitDirectory });
   assert.equal(result.started, false); assert.equal(result.enabled, false);
-  assert.equal((await stat(join(c.configDirectory, 'worker.env'))).mode & 0o777, 0o600);
+  assert.equal((await stat(renderWorkerService(c).environmentPath)).mode & 0o777, 0o600);
   assert.equal((await stat(join(unitDirectory, c.serviceName + '.service'))).mode & 0o777, 0o644);
   assert.equal(await readFile(journal, 'utf8'), '{"immutable":"completion"}\n');
   assert.ok(!calls.some(call => call.args.includes('start') || call.args.includes('enable')));
@@ -166,7 +190,7 @@ test('existing unit ownership, runtime identity and installed environment are en
   await installWorkerService(c, { run, unitDirectory });
   await assert.rejects(installWorkerService({ ...c, apiOrigin: 'https://other.example' }, { run, unitDirectory }), { code: 'camp_worker_service_identity' });
   await assert.rejects(operateWorkerService('start', { ...c, settings: { CAMP_AGENT_MEMORY_MIB: 1024 } }, { run, unitDirectory }), { code: 'camp_worker_service_identity' });
-  await writeFile(join(c.configDirectory, 'worker.env'), 'CAMP_WORKER_TOKEN=secret_override\n');
+  await writeFile(renderWorkerService(c).environmentPath, 'CAMP_WORKER_TOKEN=secret_override\n');
   await assert.rejects(operateWorkerService('start', c, { run, unitDirectory }), { code: 'camp_worker_service_identity' });
   // An operator may still stop the verified own unit to inspect bad config.
   await operateWorkerService('stop', c, { run, unitDirectory });
@@ -199,11 +223,100 @@ test('wrong local image and deployment configuration drift are rejected without 
   const { c, run, calls, unitDirectory } = await fixture(t);
   const wrong = (command, args) => command === '/usr/bin/docker' ? Promise.resolve({ stdout: 'sha256:' + '0'.repeat(64) }) : run(command, args);
   await assert.rejects(installWorkerService(c, { run: wrong, unitDirectory }), { code: 'camp_worker_service_image' });
-  assert.ok(!calls.some(call => call.command === '/usr/bin/systemctl'));
+  assert.ok(!calls.some(call => ['start', 'restart', 'daemon-reload'].includes(call.args[0])));
   await installWorkerService(c, { run, unitDirectory });
   await assert.rejects(operateWorkerService('start', { ...c, releaseManifestSha256: 'a'.repeat(64) }, { run, unitDirectory }), { code: 'camp_worker_service_identity' });
   await operateWorkerService('disable', c, { run, unitDirectory });
   assert.deepEqual(calls.at(-1).args, ['disable', 'camp-worker-pool.service']);
+});
+
+test('two config directories cannot race to acquire the same global systemd unit', async t => {
+  const { c, root, run, unitDirectory } = await fixture(t);
+  const second = { ...c, configDirectory: join(root, 'other-config') };
+  await mkdir(second.configDirectory, { mode: 0o700 });
+  let enter, release;
+  const entered = new Promise(resolve => { enter = resolve; }), resumed = new Promise(resolve => { release = resolve; });
+  const held = (command, args) => args[0] === '--version' ? (async () => { enter(); await resumed; return run(command, args); })() : run(command, args);
+  const first = installWorkerService(c, { run: held, unitDirectory }); await entered;
+  let secondCalls = 0;
+  await assert.rejects(installWorkerService(second, { run: async (...args) => { secondCalls++; return run(...args); }, unitDirectory }), { code: 'camp_worker_service_busy' });
+  assert.equal(secondCalls, 0); release(); await first;
+  const bytes = await readFile(join(unitDirectory, c.serviceName + '.service'));
+  await assert.rejects(installWorkerService(second, { run, unitDirectory }), { code: 'camp_worker_service_identity' });
+  assert.deepEqual(await readFile(join(unitDirectory, c.serviceName + '.service')), bytes);
+});
+
+test('failed upgrade keeps the old environment intact and replays only its immutable pending deployment', async t => {
+  const { c, run, unitDirectory } = await fixture(t); await installWorkerService(c, { run, unitDirectory });
+  const oldEnvironment = renderWorkerService(c).environmentPath, oldBytes = await readFile(oldEnvironment);
+  const next = { ...c, settings: { CAMP_AGENT_MEMORY_MIB: 1024 } }, wanted = renderWorkerService(next);
+  // A conflicting generation fails before the old unit is replaced.
+  await writeFile(wanted.environmentPath, 'foreign or incomplete bytes', { mode: 0o600 });
+  const unitPath = join(unitDirectory, c.serviceName + '.service'), oldUnit = await readFile(unitPath), recordPath = join(c.configDirectory, 'service-install.json'), oldRecord = await readFile(recordPath);
+  await assert.rejects(installWorkerService(next, { run, unitDirectory }), { code: 'camp_worker_service_identity' });
+  assert.deepEqual(await readFile(oldEnvironment), oldBytes); assert.deepEqual(await readFile(unitPath), oldUnit);
+  await assert.rejects(operateWorkerService('start', c, { run, unitDirectory }), { code: 'camp_worker_service_pending' });
+  await assert.rejects(installWorkerService(c, { run, unitDirectory }), { code: 'camp_worker_service_pending' });
+  await rm(wanted.environmentPath);
+  let failed = false;
+  await assert.rejects(installWorkerService(next, { run: async (command, args) => { if (args[0] === 'daemon-reload') { failed = true; throw new Error('injected reload failure'); } return run(command, args); }, unitDirectory }));
+  assert.equal(failed, true); assert.deepEqual(await readFile(oldEnvironment), oldBytes);
+  // Exact state after unit publication but before the new receipt was saved.
+  await writeFile(recordPath, oldRecord);
+  await operateWorkerService('stop', next, { run, unitDirectory });
+  await installWorkerService(next, { run, unitDirectory });
+  assert.deepEqual(await readFile(oldEnvironment), oldBytes);
+  assert.equal((await readFile(unitPath, 'utf8')), wanted.unit);
+  assert.equal(JSON.parse(await readFile(recordPath, 'utf8')).schemaVersion, 2);
+  await assert.rejects(readFile(join(c.configDirectory, 'service-install.pending.json')), { code: 'ENOENT' });
+  await operateWorkerService('start', next, { run, unitDirectory });
+});
+
+test('an actual killed installer releases both kernel locks and resumes its published intent', async t => {
+  const { c, run, unitDirectory } = await fixture(t);
+  const source = `import{installWorkerService}from ${JSON.stringify(new URL('./worker-service.mjs', import.meta.url).href)};import{stat}from'node:fs/promises';import{join}from'node:path';const c=JSON.parse(process.argv[1]),unitDirectory=process.argv[2];const run=async(command,args)=>{if(args[0]==='daemon-reload'){process.stdout.write('PUBLISHED\\n');await new Promise(()=>{});}if(args.includes('--property=FragmentPath,DropInPaths,NeedDaemonReload')){const p=join(unitDirectory,c.serviceName+'.service');return{stdout:'FragmentPath='+(await stat(p).then(()=>p,()=>''))+'\\nDropInPaths=\\nNeedDaemonReload=no\\n'};}return{stdout:command==='/usr/bin/docker'?c.imageId:args[0]==='--version'?'v24.16.0':args.includes('--property=ActiveState')?'inactive':''};};await installWorkerService(c,{unitDirectory,run});`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', source, JSON.stringify(c), unitDirectory], { stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH } });
+  child.stderr.resume(); const exited = once(child, 'close');
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exited; });
+  await Promise.race([new Promise(resolve => child.stdout.once('data', bytes => { assert.equal(bytes.toString(), 'PUBLISHED\n'); resolve(); })), exited.then(() => { throw new Error('Installer stopped before publication'); })]);
+  child.kill('SIGKILL'); await exited;
+  const pending = JSON.parse(await readFile(join(c.configDirectory, 'service-install.pending.json'), 'utf8'));
+  assert.equal(pending.nextRecord.identity.roomId, c.roomId);
+  for (let attempt = 0; ; attempt++) {
+    try { await installWorkerService(c, { run, unitDirectory }); break; }
+    catch (error) { if (error.code !== 'camp_worker_service_busy' || attempt === 20) throw error; await delay(25); }
+  }
+  await operateWorkerService('start', c, { run, unitDirectory });
+});
+
+test('start refuses loaded systemd drop-ins, stale daemon state and a different fragment', async t => {
+  const { c, run, unitDirectory, calls } = await fixture(t); await installWorkerService(c, { run, unitDirectory });
+  const fragment = join(unitDirectory, c.serviceName + '.service');
+  for (const text of [`FragmentPath=${fragment}\nDropInPaths=/etc/systemd/system/override.conf\nNeedDaemonReload=no\n`, `FragmentPath=${fragment}\nDropInPaths=\nNeedDaemonReload=yes\n`, 'FragmentPath=/run/systemd/system/foreign.service\nDropInPaths=\nNeedDaemonReload=no\n']) {
+    const modified = (command, args) => args.includes('--property=FragmentPath,DropInPaths,NeedDaemonReload') ? Promise.resolve({ stdout: text }) : run(command, args);
+    const count = calls.filter(call => call.args[0] === 'start').length;
+    await assert.rejects(operateWorkerService('start', c, { run: modified, unitDirectory }), { code: 'camp_worker_service_override' });
+    assert.equal(calls.filter(call => call.args[0] === 'start').length, count);
+    await operateWorkerService('stop', c, { run: modified, unitDirectory });
+  }
+});
+
+test('v1 live installation metadata upgrades without changing its home, Room, credential path or journal', async t => {
+  const { c, run, unitDirectory } = await fixture(t), rendered = renderWorkerService(c), unitPath = join(unitDirectory, c.serviceName + '.service');
+  const legacyPath = join(c.configDirectory, 'worker.env'), legacyUnit = rendered.unit.split('\n').filter(line => !line.startsWith(`ExecStartPre="${c.nodePath}" -e `)).join('\n').replaceAll(rendered.environmentPath, legacyPath);
+  const identity = { apiOrigin:c.apiOrigin, roomId:c.roomId, workerId:c.workerId, runtimeHome:c.runtimeHome, dockerSocket:c.dockerSocket ?? '/var/run/docker.sock', serviceName:c.serviceName };
+  const legacy = { schemaVersion:1,identity,unitPath,unitSha256:hash(legacyUnit),environmentSha256:hash(rendered.environment),releaseManifestSha256:c.releaseManifestSha256,toolchainDigest:c.toolchainDigest,imageId:c.imageId };
+  await writeFile(unitPath, legacyUnit, { mode:0o644 }); await writeFile(legacyPath, rendered.environment, { mode:0o600 });
+  await writeFile(join(c.configDirectory, 'service-install.json'), JSON.stringify(legacy), { mode:0o600 });
+  const journal = join(c.runtimeHome, 'settled.json'); await writeFile(journal, 'retained audit', { mode:0o600 });
+  await assert.rejects(operateWorkerService('start', c, { run,unitDirectory }), { code:'camp_worker_service_identity' });
+  await operateWorkerService('stop', c, { run,unitDirectory });
+  await installWorkerService(c, { run,unitDirectory });
+  const upgraded = JSON.parse(await readFile(join(c.configDirectory,'service-install.json'),'utf8'));
+  assert.equal(upgraded.schemaVersion,2);assert.equal(upgraded.identity.credentialFile,c.credentialFile);
+  assert.equal(upgraded.identity.runtimeHome,c.runtimeHome);assert.equal(upgraded.identity.roomId,c.roomId);
+  assert.equal(await readFile(journal,'utf8'),'retained audit');assert.equal(await readFile(legacyPath,'utf8'),rendered.environment);
+  await operateWorkerService('start',c,{run,unitDirectory});
 });
 
 test('generated unit passes actual systemd syntax validation with a compiled release entry', async t => {

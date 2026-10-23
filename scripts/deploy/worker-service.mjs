@@ -1,8 +1,8 @@
 import { constants } from 'node:fs';
-import { lstat, open, realpath, mkdir, readdir, rename, unlink, rmdir } from 'node:fs/promises';
+import { lstat, open, realpath, mkdir, readdir, rename, unlink } from 'node:fs/promises';
 import { createHash, randomBytes, X509Certificate } from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { promisify, parseEnv } from 'node:util';
+import { execFile, spawn } from 'node:child_process';
+import { promisify, parseEnv, isDeepStrictEqual } from 'node:util';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -16,6 +16,11 @@ const required = ['serviceName', 'configDirectory', 'nodePath', 'releasePath', '
 const optional = ['modelEnvFile', 'harnessManifest', 'dockerConfig', 'dockerSocket', 'settings'];
 const numericSettings = new Set(['CAMP_AGENT_CPU_MILLIS', 'CAMP_AGENT_MEMORY_MIB', 'CAMP_AGENT_PIDS_LIMIT', 'CAMP_MIN_FREE_MIB', 'CAMP_RUN_TIMEOUT_MS', 'CAMP_MODEL_MAX_REQUESTS', 'CAMP_MODEL_REQUEST_TIMEOUT_MS', 'CAMP_MODEL_MAX_REQUEST_BYTES', 'CAMP_MODEL_MAX_INPUT_BYTES', 'CAMP_MODEL_MAX_RESPONSE_BYTES']);
 const modelKeys = new Set(['DEEPSEEK_API_KEY', 'DEEPSEEK_BASE_URL', 'CAMP_DSH_MODEL']);
+const reserved = name => ['worker.env', 'service-install.json', 'service-install.pending.json', 'service-operation.lock'].includes(name) || /^worker-[a-f0-9]{64}\.env$/.test(name);
+const same = isDeepStrictEqual;
+// Runs before Node is allowed to consume the generation as an env file. This
+// also covers an ordinary systemctl restart that bypasses this operator CLI.
+export const WORKER_ENV_CHECK = "const fs=require('node:fs'),c=require('node:crypto');try{const f=fs.openSync(process.argv[1],fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_NONBLOCK),s=fs.fstatSync(f),b=Buffer.alloc(65537);let n=0,k;while(n<b.length&&(k=fs.readSync(f,b,n,b.length-n,null)))n+=k;fs.closeSync(f);if(!s.isFile()||s.uid!==0||s.nlink!==1||(s.mode&511)!==384||n!==s.size||n>65536||c.createHash('sha256').update(b.subarray(0,n)).digest('hex')!==process.argv[2])process.exit(1);}catch{process.exit(1);}";
 
 /** A deliberately narrow operator configuration: secrets belong in separate
  * existing private files, never JSON, argv, unit directives or rendered output. */
@@ -35,8 +40,7 @@ export function workerServiceConfiguration(input) {
   const trees = [c.releasePath, c.toolchainPath, c.runtimeHome, c.configDirectory];
   if (trees.some((left, index) => trees.some((right, other) => index !== other && (left === right || left.startsWith(right + '/'))))) throw fail();
   const inputs = ['nodePath', 'credentialFile', 'controlCaFile', 'modelEnvFile', 'harnessManifest'].map(key => c[key]).filter(Boolean);
-  const outputs = ['worker.env', 'service-install.json', 'service-operation.lock'].map(name => join(c.configDirectory, name));
-  if (new Set(inputs).size !== inputs.length || inputs.some(file => outputs.includes(file)) || c.credentialFile.startsWith(c.releasePath + '/') || c.credentialFile.startsWith(c.toolchainPath + '/')) throw fail();
+  if (new Set(inputs).size !== inputs.length || inputs.some(file => dirname(file) === c.configDirectory && reserved(file.slice(c.configDirectory.length + 1))) || c.credentialFile.startsWith(c.releasePath + '/') || c.credentialFile.startsWith(c.toolchainPath + '/')) throw fail();
   return c;
 }
 
@@ -49,14 +53,15 @@ export function renderWorkerService(input) {
     CAMP_DOCKER_SOCKET: c.dockerSocket, CAMP_POOL_ONCE: '0', CAMP_WORKER_ONCE: '0',
     ...(c.harnessManifest ? { CAMP_VERIFICATION_HARNESSES: c.harnessManifest } : {}),
     ...(c.dockerConfig ? { DOCKER_CONFIG: c.dockerConfig } : {}),
-    ...c.settings,
+    ...Object.fromEntries(Object.entries(c.settings).sort(([left], [right]) => left.localeCompare(right))),
   };
-  const envFile = join(c.configDirectory, 'worker.env');
+  const environmentText = Object.entries(environment).map(([key, value]) => `${key}=${value}`).join('\n') + '\n';
+  const envFile = join(c.configDirectory, `worker-${sha(environmentText)}.env`);
   const envArgs = [...(c.modelEnvFile ? [`--env-file=${c.modelEnvFile}`] : []), `--env-file=${envFile}`];
   const q = value => `"${value}"`; // All paths are validated ASCII without systemd expansion characters.
   const credentialDirectory = dirname(c.credentialFile);
-  const unit = `[Unit]\nDescription=Camp trusted Worker pool (${c.workerId})\nWants=network-online.target\nAfter=network-online.target docker.service\nRequires=docker.service\nStartLimitIntervalSec=300\nStartLimitBurst=3\n\n[Service]\nType=simple\nUser=root\nWorkingDirectory=${c.releasePath}\n# Node startup and each isolated agent trust the same operator public root.\nEnvironment=NODE_EXTRA_CA_CERTS=${c.controlCaFile}\n# Never inherit stale tokens, alternate origins, TLS bypasses or shell loaders.\nUnsetEnvironment=CAMP_WORKER_TOKEN CAMP_WORKER_CREDENTIAL_FILE CAMP_WORKER_ROOM_ID CAMP_API_URL CAMP_WORKER_ID CAMP_RUNTIME_HOME CAMP_TOOLCHAIN_BUNDLE CAMP_RUNTIME_IMAGE CAMP_CONTROL_CA_FILE CAMP_POOL_ONCE CAMP_WORKER_ONCE CAMP_DOCKER_SOCKET CAMP_DSH_PLUGIN CAMP_DSH_ARCHIVE CAMP_DSH_PREFIX CAMP_VERIFICATION_HARNESSES CAMP_ALLOW_INSECURE_TRANSPORT CAMP_POOL_HOST_MEMORY_RESERVE_MIB DEEPSEEK_API_KEY DEEPSEEK_BASE_URL CAMP_DSH_MODEL DOCKER_HOST DOCKER_CONFIG NODE_OPTIONS NODE_TLS_REJECT_UNAUTHORIZED ${[...numericSettings].join(' ')}\nExecStartPre=${q(c.nodePath)} ${q(join(c.releasePath, 'packages/camp-runtime/scripts/verify-worker-release.mjs'))} --release ${q(c.releasePath)} --manifest-sha256 ${c.releaseManifestSha256}\nExecStart=${q(c.nodePath)} ${envArgs.map(q).join(' ')} ${q(join(c.releasePath, 'packages/camp-runtime/scripts/worker-pool.mjs'))}\nUMask=0077\n# Same lock namespace as manual recovery/reap; Docker containers are outside this unit cgroup.\nPrivateTmp=no\nNoNewPrivileges=yes\nProtectSystem=full\nReadWritePaths=${[...new Set([c.runtimeHome, credentialDirectory])].map(q).join(' ')}\nKillMode=mixed\nKillSignal=SIGTERM\nTimeoutStopSec=180\n# Ordinary unsafe/fatal exits require inspection, not a restart loop.\nRestart=on-abnormal\nRestartSec=10\nStandardOutput=journal\nStandardError=journal\nSyslogIdentifier=${c.serviceName}\n\n[Install]\nWantedBy=multi-user.target\n`;
-  return { config: c, unit, environment: Object.entries(environment).map(([key, value]) => `${key}=${value}`).join('\n') + '\n' };
+  const unit = `[Unit]\nDescription=Camp trusted Worker pool (${c.workerId})\nWants=network-online.target\nAfter=network-online.target docker.service\nRequires=docker.service\nStartLimitIntervalSec=300\nStartLimitBurst=3\n\n[Service]\nType=simple\nUser=root\nWorkingDirectory=${c.releasePath}\n# Node startup and each isolated agent trust the same operator public root.\nEnvironment=NODE_EXTRA_CA_CERTS=${c.controlCaFile}\n# Never inherit stale tokens, alternate origins, TLS bypasses or shell loaders.\nUnsetEnvironment=CAMP_WORKER_TOKEN CAMP_WORKER_CREDENTIAL_FILE CAMP_WORKER_ROOM_ID CAMP_API_URL CAMP_WORKER_ID CAMP_RUNTIME_HOME CAMP_TOOLCHAIN_BUNDLE CAMP_RUNTIME_IMAGE CAMP_CONTROL_CA_FILE CAMP_POOL_ONCE CAMP_WORKER_ONCE CAMP_DOCKER_SOCKET CAMP_DSH_PLUGIN CAMP_DSH_ARCHIVE CAMP_DSH_PREFIX CAMP_VERIFICATION_HARNESSES CAMP_ALLOW_INSECURE_TRANSPORT CAMP_POOL_HOST_MEMORY_RESERVE_MIB DEEPSEEK_API_KEY DEEPSEEK_BASE_URL CAMP_DSH_MODEL DOCKER_HOST DOCKER_CONFIG NODE_OPTIONS NODE_TLS_REJECT_UNAUTHORIZED ${[...numericSettings].join(' ')}\nExecStartPre=${q(c.nodePath)} -e "${WORKER_ENV_CHECK}" ${q(envFile)} ${sha(environmentText)}\nExecStartPre=${q(c.nodePath)} ${q(join(c.releasePath, 'packages/camp-runtime/scripts/verify-worker-release.mjs'))} --release ${q(c.releasePath)} --manifest-sha256 ${c.releaseManifestSha256}\nExecStart=${q(c.nodePath)} ${envArgs.map(q).join(' ')} ${q(join(c.releasePath, 'packages/camp-runtime/scripts/worker-pool.mjs'))}\nUMask=0077\n# Same lock namespace as manual recovery/reap; Docker containers are outside this unit cgroup.\nPrivateTmp=no\nNoNewPrivileges=yes\nProtectSystem=full\nReadWritePaths=${[...new Set([c.runtimeHome, credentialDirectory])].map(q).join(' ')}\nKillMode=mixed\nKillSignal=SIGTERM\nTimeoutStopSec=180\n# Ordinary unsafe/fatal exits require inspection, not a restart loop.\nRestart=on-abnormal\nRestartSec=10\nStandardOutput=journal\nStandardError=journal\nSyslogIdentifier=${c.serviceName}\n\n[Install]\nWantedBy=multi-user.target\n`;
+  return { config: c, unit, environment: environmentText, environmentPath: envFile };
 }
 
 async function checkedDirectory(directory, { privateMode = false, create = false, uid = process.getuid() } = {}) {
@@ -82,9 +87,10 @@ async function ordinary(file, { privateMode = false, maximum = 65536, uid = proc
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== uid || stat.mode & (privateMode ? 0o077 : 0o022) || privateMode && (stat.mode & 0o777) !== 0o600 || stat.size > maximum) throw fail();
-    const bytes = await handle.readFile();
-    if (bytes.length !== stat.size || bytes.length > maximum) throw fail();
-    return bytes;
+    const bytes = Buffer.alloc(stat.size + 1); let length = 0;
+    while (length < bytes.length) { const next = await handle.read(bytes, length, bytes.length - length); if (!next.bytesRead) break; length += next.bytesRead; }
+    if (length !== stat.size) throw fail();
+    return bytes.subarray(0, length);
   } finally { await handle.close(); }
 }
 async function optionalJson(file) {
@@ -92,24 +98,57 @@ async function optionalJson(file) {
   catch (error) { if (error.code === 'ENOENT') return null; throw fail(); }
 }
 async function syncDirectory(folder) { const handle = await open(folder, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); try { await handle.sync(); } finally { await handle.close(); } }
-async function serviceOperation(c, operation) {
-  const lock = join(c.configDirectory, 'service-operation.lock');
-  try { await mkdir(lock, { mode: 0o700 }); }
-  catch { throw fail('camp_worker_service_busy'); }
-  const owned = await lstat(lock);
-  try { return await operation(); }
-  finally {
-    const current = await lstat(lock);
-    if (!current.isDirectory() || current.dev !== owned.dev || current.ino !== owned.ino) throw fail('camp_worker_service_busy');
-    await rmdir(lock);
-  }
+async function acquireServiceLock(file) {
+  const handle = await open(file, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+  try { const stat = await handle.stat(); if (!stat.isFile() || stat.uid !== process.getuid() || stat.nlink !== 1 || stat.mode & 0o077) throw fail(); }
+  finally { await handle.close(); }
+  const script = "process.stdout.write('LOCKED\\n');process.stdin.resume();process.stdin.on('end',()=>process.exit(0));process.stdin.on('error',()=>process.exit(0));";
+  const child = spawn('/usr/bin/flock', ['--exclusive', '--nonblock', '--conflict-exit-code', '73', '--no-fork', file, process.execPath, '-e', script], { stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', HOME: '/root' } });
+  let owned = false, releasing = false, output = '', ended = false;
+  const exited = new Promise(resolveExit => child.once('close', () => { ended = true; owned = false; resolveExit(); }));
+  child.stdin.on('error', () => {}); child.stderr.resume();
+  try {
+    await new Promise((resolveLock, reject) => {
+      const timer = setTimeout(() => reject(fail('camp_worker_service_busy')), 5000);
+      child.once('error', () => { clearTimeout(timer); reject(fail('camp_worker_service_busy')); });
+      child.once('close', () => { clearTimeout(timer); reject(fail('camp_worker_service_busy')); });
+      child.stdout.on('data', bytes => {
+        output += bytes;
+        if (output === 'LOCKED\n') { clearTimeout(timer); owned = true; resolveLock(); }
+        else if (output.length > 128) { clearTimeout(timer); reject(fail('camp_worker_service_busy')); }
+      });
+    });
+  } catch (error) { child.kill('SIGKILL'); await exited; throw error; }
+  return {
+    check: () => { if (!owned || ended || releasing) throw fail('camp_worker_service_lock_lost'); },
+    release: async () => {
+      releasing = true; child.stdin.end();
+      const timer = setTimeout(() => child.kill('SIGKILL'), 2000);
+      try { await exited; } finally { clearTimeout(timer); }
+    },
+  };
 }
-async function publish(file, bytes, mode) {
+async function serviceOperation(c, unitDirectory, operation) {
+  // One unit has one lock even when two operators supply different config
+  // directories. Also serialize different units sharing the same config root.
+  await checkedDirectory(unitDirectory);
+  const root = join(unitDirectory, '.camp-worker-service-locks');
+  await checkedDirectory(root, { privateMode: true, create: true });
+  const keys = [`unit:${join(unitDirectory, c.serviceName + '.service')}`, `config:${c.configDirectory}`].sort();
+  const locks = [];
+  try {
+    for (const key of keys) locks.push(await acquireServiceLock(join(root, sha(key) + '.lock')));
+    try { await lstat(join(c.configDirectory, 'service-operation.lock')); throw fail('camp_worker_service_busy'); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    return await operation(() => locks.forEach(lock => lock.check()));
+  } finally { for (const lock of locks.reverse()) await lock.release(); }
+}
+async function publish(file, bytes, mode, check = () => {}) {
   const temp = `${file}.tmp-${randomBytes(12).toString('hex')}`;
   const handle = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
   try { await handle.writeFile(bytes); await handle.chmod(mode); await handle.sync(); }
   finally { await handle.close(); }
-  try { await rename(temp, file); await syncDirectory(dirname(file)); }
+  try { check(); await rename(temp, file); await syncDirectory(dirname(file)); }
   finally { await unlink(temp).catch(error => { if (error.code !== 'ENOENT') throw error; }); }
 }
 
@@ -159,6 +198,7 @@ export async function validateWorkerService(input, { run = defaultRun } = {}) {
   catch { throw fail('camp_worker_service_credential'); }
   if (credential?.roomId !== c.roomId) throw fail('camp_worker_service_identity');
   const caBytes = await ordinary(c.controlCaFile, { maximum: 16384 });
+  if (!caBytes.every(byte => byte <= 127)) throw fail('camp_worker_service_ca');
   let ca;
   const pem = caBytes.toString('ascii');
   if (!/^\s*-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----\s*$/.test(pem)) throw fail('camp_worker_service_ca');
@@ -196,50 +236,110 @@ export async function validateWorkerService(input, { run = defaultRun } = {}) {
   return { manifest, identity: identity(c) };
 }
 
-/** Install stopped only: inspect and explicitly start after credentials, CA,
- * registry image and readiness checks have been reviewed. Never delete state. */
+function recordFor(c, rendered, unitPath) {
+  return { schemaVersion: 2, identity: { ...identity(c), configDirectory: c.configDirectory, credentialFile: c.credentialFile }, unitPath, unitSha256: sha(rendered.unit), environmentPath: rendered.environmentPath, environmentSha256: sha(rendered.environment), releaseManifestSha256: c.releaseManifestSha256, toolchainDigest: c.toolchainDigest, imageId: c.imageId };
+}
+function matchesIdentity(record, c) {
+  const expected = record.schemaVersion === 1 ? identity(c) : { ...identity(c), configDirectory: c.configDirectory, credentialFile: c.credentialFile };
+  return [1, 2].includes(record.schemaVersion) && same(record.identity, expected);
+}
+function environmentPath(record, c) {
+  const file = record.schemaVersion === 1 ? join(c.configDirectory, 'worker.env') : record.environmentPath;
+  if (!path(file) || dirname(file) !== c.configDirectory || !/^worker-(?:[a-f0-9]{64})\.env$/.test(file.slice(c.configDirectory.length + 1)) && record.schemaVersion !== 1) throw fail('camp_worker_service_identity');
+  return file;
+}
+async function unitText(unitPath) {
+  try { return (await ordinary(unitPath)).toString('utf8'); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+}
+async function verifyRecordEnvironment(record, c) {
+  const bytes = await ordinary(environmentPath(record, c), { privateMode: true });
+  // Older receipts did not explicitly bind the credential pathname. The
+  // immutable old environment supplies that fact during the first upgrade.
+  if (sha(bytes) !== record.environmentSha256 || parseEnv(bytes.toString('utf8')).CAMP_WORKER_CREDENTIAL_FILE !== c.credentialFile) throw fail('camp_worker_service_identity');
+}
+async function loadedUnit(run, name, unitPath, { fresh = false, allowReload = false, allowMissing = false } = {}) {
+  const text = (await run('/usr/bin/systemctl', ['show', '--property=FragmentPath,DropInPaths,NeedDaemonReload', name])).stdout;
+  const values = Object.fromEntries(text.trim().split('\n').filter(Boolean).map(line => { const at = line.indexOf('='); return [line.slice(0, at), line.slice(at + 1)]; }));
+  if (fresh ? values.FragmentPath !== '' : values.FragmentPath !== unitPath && !(allowMissing && values.FragmentPath === '')) throw fail('camp_worker_service_override');
+  if (values.DropInPaths !== '' || !['yes', 'no'].includes(values.NeedDaemonReload) || !allowReload && values.NeedDaemonReload !== 'no') throw fail('camp_worker_service_override');
+}
+function checkedIntent(intent, c, rendered, unitPath) {
+  const next = recordFor(c, rendered, unitPath);
+  if (!own(intent, ['schemaVersion', 'previousUnitSha256', 'previousRecordDigest', 'nextRecord', 'unit', 'environment']) || intent.schemaVersion !== 1 || intent.previousUnitSha256 !== null && !hex(intent.previousUnitSha256) || intent.previousRecordDigest !== null && !hex(intent.previousRecordDigest) || !same(intent.nextRecord, next) || intent.unit !== rendered.unit || intent.environment !== rendered.environment) throw fail('camp_worker_service_pending');
+  return next;
+}
+async function immutableEnvironment(file, bytes, check) {
+  try {
+    const previous = await ordinary(file, { privateMode: true });
+    if (!previous.equals(Buffer.from(bytes))) throw fail('camp_worker_service_identity');
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    // Do not expose a partial generation if the installer is killed while
+    // writing it. A complete generation is never rewritten on replay.
+    await publish(file, bytes, 0o600, check);
+  }
+}
+
+/** Install stopped only. A durable intent replays the exact same deployment;
+ * each unit always references its own immutable environment generation. */
 export async function installWorkerService(input, { unitDirectory = '/etc/systemd/system', run = defaultRun } = {}) {
   const rendered = renderWorkerService(input), c = rendered.config;
   if (process.getuid() !== 0 || !path(unitDirectory)) throw fail();
-  await validateWorkerService(c, { run });
-  await checkedDirectory(unitDirectory);
   await checkedDirectory(c.configDirectory, { privateMode: true, create: true });
-  return serviceOperation(c, async () => {
-  const recordPath = join(c.configDirectory, 'service-install.json'), unitPath = join(unitDirectory, c.serviceName + '.service');
-  const previous = await optionalJson(recordPath);
-  let current;
-  try { current = (await ordinary(unitPath)).toString('utf8'); }
-  catch (error) { if (error.code !== 'ENOENT') throw error; }
-  if (previous && (previous.schemaVersion !== 1 || previous.unitPath !== unitPath || JSON.stringify(previous.identity) !== JSON.stringify(identity(c))) || current !== undefined && (!previous || sha(current) !== previous.unitSha256) || previous && (current === undefined || sha(await ordinary(join(c.configDirectory, 'worker.env'), { privateMode: true })) !== previous.environmentSha256)) throw fail('camp_worker_service_identity');
-  const state = await run('/usr/bin/systemctl', ['show', '--property=ActiveState', '--value', c.serviceName + '.service']);
-  if (!['inactive', 'failed', ''].includes(state.stdout.trim())) throw fail('camp_worker_service_active');
-  // Environment first, unit second, ownership record last. Partial installs
-  // fail closed on the next invocation and never overwrite a foreign unit.
-  await publish(join(c.configDirectory, 'worker.env'), rendered.environment, 0o600);
-  await publish(unitPath, rendered.unit, 0o644);
-  const record = { schemaVersion: 1, identity: identity(c), unitPath, unitSha256: sha(rendered.unit), environmentSha256: sha(rendered.environment), releaseManifestSha256: c.releaseManifestSha256, toolchainDigest: c.toolchainDigest, imageId: c.imageId };
-  await publish(recordPath, JSON.stringify(record, null, 2) + '\n', 0o600);
-  await run('/usr/bin/systemctl', ['daemon-reload']);
-  return { event: 'worker_service_installed', service: c.serviceName + '.service', started: false, enabled: false, releaseManifestSha256: c.releaseManifestSha256 };
+  return serviceOperation(c, unitDirectory, async check => {
+    const guardedRun = async (...args) => { check(); const result = await run(...args); check(); return result; };
+    const recordPath = join(c.configDirectory, 'service-install.json'), pendingPath = join(c.configDirectory, 'service-install.pending.json'), unitPath = join(unitDirectory, c.serviceName + '.service');
+    const previous = await optionalJson(recordPath), pending = await optionalJson(pendingPath), current = await unitText(unitPath), desired = recordFor(c, rendered, unitPath);
+    if (pending) {
+      checkedIntent(pending, c, rendered, unitPath);
+      if (![pending.previousUnitSha256, desired.unitSha256].includes(current === null ? null : sha(current)) || ![pending.previousRecordDigest, sha(JSON.stringify(desired))].includes(previous === null ? null : sha(JSON.stringify(previous)))) throw fail('camp_worker_service_pending');
+    } else {
+      if (previous && (previous.unitPath !== unitPath || !matchesIdentity(previous, c)) || current !== null && (!previous || sha(current) !== previous.unitSha256) || previous && current === null) throw fail('camp_worker_service_identity');
+      if (previous) await verifyRecordEnvironment(previous, c);
+    }
+    await loadedUnit(guardedRun, c.serviceName + '.service', unitPath, { fresh: current === null, allowReload: true, allowMissing: Boolean(pending && pending.previousUnitSha256 === null) });
+    const state = await guardedRun('/usr/bin/systemctl', ['show', '--property=ActiveState', '--value', c.serviceName + '.service']);
+    if (!['inactive', 'failed', ''].includes(state.stdout.trim())) throw fail('camp_worker_service_active');
+    await validateWorkerService(c, { run: guardedRun }); check();
+    const intent = pending ?? { schemaVersion: 1, previousUnitSha256: current === null ? null : sha(current), previousRecordDigest: previous === null ? null : sha(JSON.stringify(previous)), nextRecord: desired, unit: rendered.unit, environment: rendered.environment };
+    if (!pending) await publish(pendingPath, JSON.stringify(intent, null, 2) + '\n', 0o600, check);
+    check(); await immutableEnvironment(rendered.environmentPath, rendered.environment, check); check();
+    await publish(unitPath, rendered.unit, 0o644, check);
+    await publish(recordPath, JSON.stringify(desired, null, 2) + '\n', 0o600, check);
+    await guardedRun('/usr/bin/systemctl', ['daemon-reload']);
+    await loadedUnit(guardedRun, c.serviceName + '.service', unitPath);
+    check(); await unlink(pendingPath); await syncDirectory(c.configDirectory);
+    return { event: 'worker_service_installed', service: c.serviceName + '.service', started: false, enabled: false, releaseManifestSha256: c.releaseManifestSha256 };
   });
 }
 
 export async function operateWorkerService(action, input, { unitDirectory = '/etc/systemd/system', run = defaultRun } = {}) {
-  if (!['start', 'stop', 'restart', 'status', 'enable', 'disable'].includes(action) || process.getuid() !== 0) throw fail();
+  if (!['start', 'stop', 'restart', 'status', 'enable', 'disable'].includes(action) || process.getuid() !== 0 || !path(unitDirectory)) throw fail();
   const c = workerServiceConfiguration(input);
   await checkedDirectory(c.configDirectory, { privateMode: true });
-  return serviceOperation(c, async () => {
-  const record = await optionalJson(join(c.configDirectory, 'service-install.json'));
-  const unitPath = join(unitDirectory, c.serviceName + '.service');
-  if (!record || record.unitPath !== unitPath || JSON.stringify(record.identity) !== JSON.stringify(identity(c)) || sha(await ordinary(unitPath)) !== record.unitSha256) throw fail('camp_worker_service_identity');
-  if (['start', 'restart', 'enable'].includes(action)) {
-    const rendered = renderWorkerService(c);
-    if (sha(rendered.unit) !== record.unitSha256 || sha(rendered.environment) !== record.environmentSha256 || sha(await ordinary(join(c.configDirectory, 'worker.env'), { privateMode: true })) !== record.environmentSha256) throw fail('camp_worker_service_identity');
-    await validateWorkerService(c, { run });
-  }
-  const args = action === 'status' ? ['show', '--property=ActiveState,SubState,Result,MainPID,ExecMainStatus', c.serviceName + '.service'] : [action, c.serviceName + '.service'];
-  const result = await run('/usr/bin/systemctl', args);
-  return { event: 'worker_service_' + action, service: c.serviceName + '.service', ...(action === 'status' ? { state: result.stdout.trim() } : {}) };
+  return serviceOperation(c, unitDirectory, async check => {
+    const guardedRun = async (...args) => { check(); const result = await run(...args); check(); return result; };
+    const unitPath = join(unitDirectory, c.serviceName + '.service'), current = await unitText(unitPath), pending = await optionalJson(join(c.configDirectory, 'service-install.pending.json'));
+    const previous = await optionalJson(join(c.configDirectory, 'service-install.json'));
+    // A partially published but owned deployment may always be stopped or
+    // inspected. It must be repaired before any operation can start it.
+    const starts = ['start', 'restart', 'enable'].includes(action);
+    if (pending && starts) throw fail('camp_worker_service_pending');
+    const record = pending?.nextRecord?.unitSha256 === (current === null ? null : sha(current)) ? pending.nextRecord : previous;
+    if (!record || record.unitPath !== unitPath || !matchesIdentity(record, c) || current === null || sha(current) !== record.unitSha256) throw fail('camp_worker_service_identity');
+    if (starts) {
+      const rendered = renderWorkerService(c), expected = recordFor(c, rendered, unitPath);
+      // v1 records can be stopped and upgraded, but their mutable env layout
+      // must go through install before a new reviewed start.
+      if (!same(record, expected)) throw fail('camp_worker_service_identity');
+      await verifyRecordEnvironment(record, c);
+      await loadedUnit(guardedRun, c.serviceName + '.service', unitPath);
+      await validateWorkerService(c, { run: guardedRun });
+    }
+    const args = action === 'status' ? ['show', '--property=ActiveState,SubState,Result,MainPID,ExecMainStatus', c.serviceName + '.service'] : [action, c.serviceName + '.service'];
+    const result = await guardedRun('/usr/bin/systemctl', args);
+    return { event: 'worker_service_' + action, service: c.serviceName + '.service', ...(action === 'status' ? { state: result.stdout.trim() } : {}) };
   });
 }
 
@@ -249,7 +349,7 @@ export async function workerServiceMain(args) {
   let config;
   try { config = JSON.parse((await ordinary(file, { privateMode: true })).toString('utf8')); } catch { throw fail(); }
   const checked = workerServiceConfiguration(config);
-  if (['worker.env', 'service-install.json', 'service-operation.lock'].some(name => file === join(checked.configDirectory, name))) throw fail();
+  if (dirname(file) === checked.configDirectory && reserved(file.slice(checked.configDirectory.length + 1))) throw fail();
   if (action === 'render') {
     const { unit, environment } = renderWorkerService(config);
     return { unit, environment };

@@ -32,12 +32,32 @@ repository credential on the Worker when the registry supports that scope.
 The helper requires `--docker-config /absolute/private/path` or the same path
 through `DOCKER_CONFIG`; it does not fall back to a user's global Docker config.
 It never reads or prints authentication contents. Child Docker processes receive
-the dedicated path and required Docker/network environment, excluding unrelated
-model and Room credentials. Docker failures return fixed error codes.
+the dedicated path and a fixed host tool search path, excluding unrelated model
+and Room credentials. The helper ignores ambient `DOCKER_HOST`, `DOCKER_CONTEXT`,
+proxy and alternate TLS environment. Credential helpers must be installed on the
+trusted host tool path. Docker failures return fixed error codes.
+
+Every command uses an explicit local Unix socket. Select it with
+`--docker-socket`, or `CAMP_DOCKER_SOCKET`; the compatibility default is
+`/var/run/docker.sock`. Remote Docker contexts are outside this deployment
+contract. The socket and authentication paths must have trusted, unwritable
+ancestors. A root-owned sticky `/tmp` is accepted for private temporary builds.
+The receipt records the canonical socket and Docker daemon ID hash, checked
+before and after the operation. Pin a known daemon with `--docker-id-hash` when
+the operation is attached to an existing deployment.
 
 The registry must use verified HTTPS. Configure an operator-owned private CA in
 Docker's trust store when necessary. Do not configure the registry as insecure,
-disable certificate verification or publish the Docker socket.
+disable certificate verification or publish the Docker socket. Before any
+registry request, the helper checks the local daemon's `RegistryConfig` and all
+current IPv4/IPv6 DNS answers against its insecure host/CIDR rules. It repeats
+those checks before issuing a successful receipt. A direct CLI manifest request
+does not prove that the daemon will preserve TLS on push or pull. Unknown policy,
+failed DNS, insecure matching addresses and target registry mirrors fail closed.
+Daemon proxy configuration remains an operator-managed host concern; a proxy
+must preserve verified registry HTTPS. These checks assume the local privileged
+daemon, DNS and trust configuration remain under operator control during the
+operation.
 
 ## Explicit operations
 
@@ -47,6 +67,7 @@ release tag; production Workers always consume the returned digest reference.
 ```sh
 node scripts/deploy/oci-image.mjs inspect \
   --docker-config /etc/camp/publisher-docker \
+  --docker-socket /var/run/docker.sock \
   --image-id sha256:<reviewed-local-image-id> \
   --toolchain-digest <reviewed-toolchain-digest>
 
@@ -59,6 +80,7 @@ node scripts/deploy/oci-image.mjs publish \
 
 node scripts/deploy/oci-image.mjs pull \
   --docker-config /etc/camp/pull-docker \
+  --docker-socket /var/run/docker.sock \
   --reference registry.example.org/camp/runtime@sha256:<registry-manifest-digest> \
   --image-id sha256:<reviewed-local-image-id> \
   --toolchain-digest <reviewed-toolchain-digest>
@@ -69,13 +91,29 @@ the only commands that mutate Docker state. Pull rejects tags, partial digests
 and implicit `latest`. Publish checks the source identity first, refuses an
 already published tag, rejects an unrelated local alias and publishes a new
 tag. Authentication/network failures are not treated as a missing tag. It then
-retrieves the exact digest reference returned by Docker and checks the source
-image again. Use a single publisher or the registry's tag immutability policy
-to prevent concurrent publishers racing that existence check.
+retrieves the exact digest reference returned by Docker, pulls that reference
+back and checks its actual image ID and toolchain label before checking the
+source again. Keeping the source ID cached is not proof that a mutable local
+tag published the same image. Use a single publisher or the registry's tag
+immutability policy to prevent concurrent publishers racing that existence
+check; a client-side existence check is not a registry compare-and-swap.
+
+Manifest preflight accepts bounded Docker v2/OCI images and indexes. For an
+index it checks the selected Linux platform's image manifest before pulling.
+Foreign layer URLs and embedded descriptor data are rejected. The supported
+envelope is 128 layer descriptors, 8 GiB per layer and 16 GiB total compressed
+layer bytes; config and manifest descriptors are bounded to 4 MiB. Other formats
+need an explicit reviewed extension rather than an implicit download fallback.
 
 The helper does not delete cached images on a failed pull: another project may
 still use them. A failed verification produces no successful deployment receipt
 and cannot update service configuration or candidate identities.
+An interrupted publication can have committed remotely even when the client
+received no receipt. Retrying publication still refuses the existing tag; do
+not overwrite it or infer success from a cached source image. Recover the
+immutable digest through the registry's trusted operator interface, then use
+`pull` with the original expected image/toolchain identities to verify it.
+An interrupted digest pull can be repeated safely using that same reference.
 
 ## Current deployment scope
 

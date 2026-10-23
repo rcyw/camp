@@ -103,6 +103,17 @@ test('legacy token environments retain their existing API and request identity',
   assert.equal(selected.env, env); assert.equal(selected.request, request);
 });
 
+test('managed control authentication and binary transport share one default origin', async t => {
+  const f = await fixture(), calls = [];
+  try {
+    t.mock.method(globalThis, 'fetch', async url => { calls.push(url); return Response.json(url.endsWith('/credential/renew') ? f.value : { available: true }); });
+    const { privateArtifactRequest } = await import('../src/private-artifacts.mjs');
+    const managed = await managedWorkerCredential({ env: { CAMP_WORKER_CREDENTIAL_FILE: f.path } });
+    await managed.wrapRequest(privateArtifactRequest(managed.env))('/storage-operations/example');
+    assert.deepEqual(calls, ['http://127.0.0.1:3001/api/camp/worker/credential/renew', 'http://127.0.0.1:3001/api/camp/worker/storage-operations/example']);
+  } finally { await f.close(); }
+});
+
 test('a FIFO credential fails promptly instead of hanging startup before the host manager lock', async () => {
   const f = await fixture();
   try {
@@ -144,6 +155,20 @@ test('capped leases renew once daily across lanes and transfers without a last-w
     assert.equal(renewals, 2); assert.equal(writes, 2);
     const restarted = await managedWorkerCredential({ env: f.env, now: () => clock, request: async () => { renewals++; return capped; } });
     await restarted.request('/protocol'); assert.equal(renewals, 4, 'Each process authenticates before use even with a recently issued lease');
+  } finally { await f.close(); }
+});
+
+test('resuming while the monotonic clock was paused renews once before ordinary traffic', async () => {
+  const f = await fixture(); let wall = f.now, clock = 0, renewals = 0;
+  try {
+    const managed = await managedWorkerCredential({ env: f.env, now: () => clock, wallNow: () => wall, request: async route => {
+      if (route === '/credential/renew') { renewals++; return f.value; }
+      return {};
+    } });
+    await managed.request('/setup'); assert.equal(renewals, 1);
+    wall += 6 * day; await Promise.all(Array.from({ length: 20 }, () => managed.request('/heartbeat', {}))); assert.equal(renewals, 2);
+    wall -= 7 * day; clock += day; await managed.request('/protocol'); assert.equal(renewals, 3);
+    await managed.request('/protocol'); assert.equal(renewals, 3);
   } finally { await f.close(); }
 });
 

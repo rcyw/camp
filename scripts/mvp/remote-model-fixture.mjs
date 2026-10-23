@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { basename, isAbsolute, resolve } from 'node:path';
 import { parseCandidate, serializeIntegrationInput } from '../../packages/camp-protocol/src/index.js';
 
 export const hash = value => createHash('sha256').update(value).digest('hex');
@@ -9,9 +10,12 @@ export const editableFiles = Object.freeze(['foundation/index.js', 'left/index.j
 // verifier. The private host operation directory still protects its pathname.
 export const modelHarnessMode = 0o444;
 export function standardModelWorkerCommand(argv, release) {
+  const canonical = value => typeof value === 'string' && isAbsolute(value) && /^\/[A-Za-z0-9_./-]+$/.test(value) && resolve(value) === value && value !== '/';
+  if (!canonical(release) || !Array.isArray(argv) || argv.length < 2 || !argv.every(value => typeof value === 'string')) return false;
   const entry = release + '/packages/camp-runtime/scripts/worker-pool.mjs';
-  return Array.isArray(argv) && argv.length >= 2 && argv.at(-1) === entry
-    && !argv.some(value => /^(?:-e|-r|--eval(?:=|$)|--require(?:=|$)|--import(?:=|$)|--loader(?:=|$)|--experimental-loader(?:=|$)|--once$|--test(?:=|$)|--check$)/.test(value));
+  if (argv.at(-1) !== entry || !(['node', 'nodejs'].includes(argv[0]) || canonical(argv[0]) && ['node', 'nodejs'].includes(basename(argv[0])))) return false;
+  const files = argv.slice(1, -1).map(value => value.startsWith('--env-file=') ? value.slice('--env-file='.length) : null);
+  return files.every(canonical) && new Set(files).size === files.length;
 }
 export function modelFixture(name = 'camp-remote-model') {
   assert.match(name, /^[a-z][a-z0-9-]{0,99}$/);
@@ -30,15 +34,33 @@ export function modelFixture(name = 'camp-remote-model') {
 }
 export function modelContract(fixture, workspace = '/workspace') {
   assert.equal(typeof workspace, 'string');
+  const inputs = ['  ALICE \t SMITH  ', 'Bob\nJONES', '', '  '];
+  const normalized = ['alice smith', 'bob jones', '', ''];
+  const expectedResults = {
+    schemaVersion: 1,
+    values: normalized.map(value => [value, 'Hello, ' + (value || 'stranger') + '!', value.replaceAll(' ', '-')].map(result => ({ kind: 'return', value: result }))),
+    invalid: Array.from({ length: 5 }, () => Array.from({ length: 3 }, () => ({ kind: 'throw', typeError: true }))),
+  };
+  // Candidate modules are imported only in a child. Patching node:assert or
+  // printing a success marker/exit(0) there cannot decide the parent verdict.
+  // This is a bounded behavior probe, not same-UID malicious-code isolation.
+  const child = [
+    `const root=${JSON.stringify(workspace)},inputs=${JSON.stringify(inputs)};`,
+    'const stringify=JSON.stringify.bind(JSON),write=process.stdout.write.bind(process.stdout),exit=process.exit.bind(process),TypeErrorClass=TypeError;',
+    'const{normalizeName}=await import(root+"/foundation/index.js"),{greetName}=await import(root+"/left/index.js"),{slugName}=await import(root+"/right/index.js");',
+    'const functions=[normalizeName,greetName,slugName];function observe(fn,input){try{return{kind:"return",value:fn(input)};}catch(error){return{kind:"throw",typeError:error instanceof TypeErrorClass};}}',
+    'const values=inputs.map(input=>functions.map(fn=>observe(fn,input))),invalid=[null,undefined,42,{},[]].map(input=>functions.map(fn=>observe(fn,input)));',
+    'write(stringify({schemaVersion:1,values,invalid}),()=>exit(0));',
+  ].join('\n');
   return [
-    "import assert from 'node:assert/strict';import{createHash}from'node:crypto';import{readFile,readdir}from'node:fs/promises';",
+    "import assert from 'node:assert/strict';import{createHash}from'node:crypto';import{readFile,readdir}from'node:fs/promises';import{spawn}from'node:child_process';import{isDeepStrictEqual}from'node:util';",
     `const root=${JSON.stringify(workspace)};`,
     `const expected=${JSON.stringify(Object.keys(fixture.files).sort())},protectedHashes=${JSON.stringify(fixture.protectedHashes)};`,
-    "async function files(path=''){const result=[];for(const item of await readdir(root+'/'+path,{withFileTypes:true})){assert.ok(item.isFile()||item.isDirectory(),'No special or linked files');const name=path+item.name;if(item.isDirectory())result.push(...await files(name+'/'));else result.push(name);}return result.sort();}",
-    "assert.deepEqual(await files(),expected,'Unexpected or missing candidate files');for(const[path,digest]of Object.entries(protectedHashes))assert.equal(createHash('sha256').update(await readFile(root+'/'+path)).digest('hex'),digest,'Protected test or metadata changed: '+path);",
-    "const{normalizeName}=await import(root+'/foundation/index.js'),{greetName}=await import(root+'/left/index.js'),{slugName}=await import(root+'/right/index.js');",
-    "for(const[input,normalized]of[['  ALICE \\t SMITH  ','alice smith'],['Bob\\nJONES','bob jones'],['',''],['  ','']]){assert.equal(normalizeName(input),normalized);assert.equal(greetName(input),'Hello, '+(normalized||'stranger')+'!');assert.equal(slugName(input),normalized.replaceAll(' ','-'));}",
-    "for(const input of[null,undefined,42,{},[]])for(const fn of[normalizeName,greetName,slugName])assert.throws(()=>fn(input),TypeError);console.log('CAMP_REMOTE_MODEL_CONTRACT_PASSED');",
+    "const directories=new Set(expected.flatMap(path=>path.split('/').slice(0,-1).map((_,index)=>path.split('/').slice(0,index+1).join('/'))));",
+    "async function checkInventory(){let entries=0;async function files(path=''){const result=[];for(const item of await readdir(root+'/'+path,{withFileTypes:true})){assert.ok(++entries<=32&& (item.isFile()||item.isDirectory()),'Unexpected inventory or linked/special file');const name=path+item.name;if(item.isDirectory()){assert.ok(directories.has(name),'Unexpected candidate directory');result.push(...await files(name+'/'));}else result.push(name);}return result.sort();}assert.ok(isDeepStrictEqual(await files(),expected),'Unexpected or missing candidate files');for(const[path,digest]of Object.entries(protectedHashes))assert.equal(createHash('sha256').update(await readFile(root+'/'+path)).digest('hex'),digest,'Protected test or metadata changed: '+path);}",
+    `const childCode=${JSON.stringify(child)},expectedResults=${JSON.stringify(expectedResults)};`,
+    "function runCandidate(){return new Promise((resolve,reject)=>{const child=spawn(process.execPath,['--input-type=module','-e',childCode],{cwd:root,detached:true,stdio:['ignore','pipe','pipe'],env:{PATH:'/usr/local/bin:/usr/bin:/bin',LANG:'C.UTF-8'}});let done=false,total=0,stderrBytes=0;const chunks=[];let timer;function fail(){if(done)return;done=true;clearTimeout(timer);if(child.pid)try{process.kill(-child.pid,'SIGKILL');}catch{}child.stdout.destroy();child.stderr.destroy();reject(Error('Candidate behavior subprocess did not complete a valid bounded report'));}timer=setTimeout(fail,5000);child.once('error',fail);child.stdout.on('data',bytes=>{total+=bytes.length;if(total>32768)return fail();chunks.push(bytes);});child.stderr.on('data',bytes=>{stderrBytes+=bytes.length;total+=bytes.length;if(total>32768)fail();});child.once('close',(code,signal)=>{if(done)return;if(code!==0||signal||stderrBytes)return fail();let result;try{result=JSON.parse(new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(Buffer.concat(chunks)));}catch{return fail();}done=true;clearTimeout(timer);resolve(result);});});}",
+    "await checkInventory();let report,failed=false;try{report=await runCandidate();}catch{failed=true;}await checkInventory();assert.ok(!failed&&isDeepStrictEqual(report,expectedResults),'Candidate behavior did not satisfy the trusted contract');console.log('CAMP_REMOTE_MODEL_CONTRACT_PASSED');",
   ].join('\n') + '\n';
 }
 export function modelGoal() {

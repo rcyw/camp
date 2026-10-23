@@ -26,10 +26,13 @@ server configuration, including `DATABASE_URL`, authentication/session secrets
 and any enabled integration settings. Preserve their existing values during the
 service transition; the renderer deliberately does not capture them. Do not put
 Worker Room credentials or model provider keys in this file. Keep
-`CAMP_LISTEN_HOST=127.0.0.1` or omit it: systemd environment files take precedence
-over the unit's loopback default. Avoid `NODE_OPTIONS` or other executable loader
+`CAMP_LISTEN_HOST=127.0.0.1` or omit it. The final `env` assignment in `ExecStart`
+enforces loopback even if an environment file contains a wildcard bind; `env`
+executes Node in the same main PID. Avoid `NODE_OPTIONS` or other executable loader
 overrides. The server also loads its working-directory `.env` through dotenv;
 review that existing file and its permissions before changing the launch method.
+`ExecStart` removes `DOTENV_CONFIG_OVERRIDE` so that file cannot replace the
+enforced bind address, including when an old environment enables dotenv override.
 
 The unit runs as root to match the current control deployment, with a private
 temporary directory, no watch process, a five-second failure restart delay and a
