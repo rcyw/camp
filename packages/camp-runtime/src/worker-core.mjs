@@ -43,6 +43,15 @@ export class LeaseGuard {
 export function checkedClaim(value) {
   if (value?.run === null) return null;
   const run = value?.run;
-  if (!run || typeof run.id !== 'string' || !Number.isSafeInteger(run.epoch) || run.epoch <= 0 || typeof run.prompt !== 'string' || typeof run.runToken !== 'string') throw new Error('Camp claim returned malformed run data');
+  if (!run || typeof run.id !== 'string' || !Number.isSafeInteger(run.epoch) || run.epoch <= 0) throw new Error('Camp claim returned malformed run data');
+  const executor = run.executor ?? (run.protocolVersion === 1 || run.protocolVersion === undefined ? 'agent' : undefined);
+  if (executor === 'agent') {
+    if (typeof run.prompt !== 'string' || typeof run.runToken !== 'string') throw new Error('Camp agent claim returned malformed run data');
+  } else if (executor === 'verification') {
+    if (run.taskKind !== 'verification' || typeof run.operationId !== 'string' || run.taskId !== null || run.role !== null || run.agentId !== null || !run.inputCandidate || !run.verificationPolicy) throw new Error('Camp verification claim returned malformed run data');
+  } else if (executor === 'integration') {
+    if (run.taskKind !== 'integration' || typeof run.operationId !== 'string' || run.taskId !== null || run.role !== null || run.agentId !== null || !run.inputCandidate || !run.integrationInput || run.runToken !== undefined || run.protocolVersion < 3) throw new Error('Camp integration claim returned malformed run data');
+  } else throw new Error('Camp claim returned an unknown executor');
+  run.executor = executor;
   return run;
 }

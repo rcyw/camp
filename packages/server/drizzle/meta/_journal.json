@@ -2633,6 +2633,55 @@
       "when": 1792738000000,
       "tag": "0375_camp_goals",
       "breakpoints": true
+    },
+    {
+      "idx": 376,
+      "version": "7",
+      "when": 1792838000000,
+      "tag": "0376_camp_serial_delivery",
+      "breakpoints": true
+    },
+    {
+      "idx": 377,
+      "version": "7",
+      "when": 1792938000000,
+      "tag": "0377_camp_worker_protocol",
+      "breakpoints": true
+    },
+    {
+      "idx": 378,
+      "version": "7",
+      "when": 1793038000000,
+      "tag": "0378_camp_trusted_verification",
+      "breakpoints": true
+    },
+    {
+      "idx": 379,
+      "version": "7",
+      "when": 1793138000000,
+      "tag": "0379_camp_completion_payload_hash",
+      "breakpoints": true
+    },
+    {
+      "idx": 380,
+      "version": "7",
+      "when": 1793238000000,
+      "tag": "0380_camp_worker_setup",
+      "breakpoints": true
+    },
+    {
+      "idx": 381,
+      "version": "7",
+      "when": 1793338000000,
+      "tag": "0381_camp_pair_integration",
+      "breakpoints": true
+    },
+    {
+      "idx": 382,
+      "version": "7",
+      "when": 1793438000000,
+      "tag": "0382_camp_integration_inspection",
+      "breakpoints": true
     }
   ]
 }

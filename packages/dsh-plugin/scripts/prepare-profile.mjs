@@ -2,6 +2,8 @@
 import { mkdir, readFile, symlink, writeFile, lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { pluginProtocol } from '../src/protocol.js';
+import { parseWorkerDeclaration } from '../../camp-protocol/src/index.js';
 
 const args = process.argv.slice(2);
 const option = (/** @type {string} */ key) => {
@@ -11,6 +13,8 @@ const home = option("--home") ?? process.env.DSH_HOME;
 const modules = option("--node-modules") ?? process.env.CAMP_DSH_NODE_MODULES;
 const plugin = option("--plugin") ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 if (!home || !modules) throw new Error("Usage: node prepare-profile.mjs --home <DSH_HOME> --node-modules <installed node_modules> [--plugin <bundle directory>]");
+const declared = parseWorkerDeclaration(JSON.parse(await readFile(path.join(plugin, 'protocol.json'), 'utf8')));
+if (JSON.stringify(declared) !== JSON.stringify(pluginProtocol)) throw new Error('Selected Camp plugin protocol descriptor does not match this profile assembler');
 const packageRoots = {
   "@deepseek-ai/dsh-base": path.join(modules, "@deepseek-ai/dsh-base"),
   "@deepseek-ai/dsh-acp-app": path.join(modules, "@deepseek-ai/dsh-acp-app"),
@@ -34,6 +38,7 @@ for (const [name, root] of Object.entries(packageRoots)) {
 }
 await writeFile(path.join(profile, "package.json"), `${JSON.stringify({
   name: "dsh-profile-camp", private: true, type: "module",
+  campProtocol: declared,
   dependencies: Object.fromEntries(Object.entries(packageRoots).map(([name, root]) => [name, `file:${path.resolve(root)}`])),
   dsh: { profile: { bundles: Object.keys(packageRoots) } },
 }, null, 2)}\n`);

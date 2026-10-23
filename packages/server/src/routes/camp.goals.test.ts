@@ -4,12 +4,12 @@ import { and, eq, sql } from "drizzle-orm";
 import { apiTest } from "../test/integration/apiTest";
 import type { createSeed } from "../test/integration/seed";
 import type { createHttpClient } from "../test/integration/http";
-import { campEvents, campGoals, campRuns, campTasks, channelAgents, serverMembers, tasks } from "../db/schema";
+import { campEvents, campGoals, campRooms, campRuns, campWorkerTokens, channelAgents, channelConversionFences, channelConversionJobs, channels, serverMembers, tasks } from "../db/schema";
 import { reconcileCampPass } from "../services/camp/reconcile";
 import { authenticateCampToken, claimRun, recordRunEvent } from "../services/camp/runs";
 import { requireCampAdmin, revokeWorkerToken } from "../services/camp/rooms";
 import { retryGoal } from "../services/camp/goals";
-import type { CampBudget, CampClaimedRun, CampGoalAttemptSummary } from "../services/camp/types";
+import type { CampBudget, CampAgentClaimedRun as CampClaimedRun, CampGoalAttemptSummary } from "../services/camp/types";
 
 type Snapshot = { goals: Array<{ id: string; attempt: number; status: string; reason: string | null; usage: { runs: number; reviewRounds: number }; budget: CampBudget; canRetry: boolean; canCancel: boolean; attemptHistory: CampGoalAttemptSummary[] }>; tasks: Array<{ id: string; role: string; goalId: string; goalAttempt: number; status: string; dependsOn: string[] }>; runs: Array<{ id: string; status: string; cleanupState: string }> };
 async function fixture({ seed, http, app }: { seed: ReturnType<typeof createSeed>; http: ReturnType<typeof createHttpClient>; app: { baseUrl: string } }) {
@@ -25,7 +25,7 @@ async function fixture({ seed, http, app }: { seed: ReturnType<typeof createSeed
   const worker = async (path: string, body?: unknown, credential = token) => fetch(`${app.baseUrl}/api/camp/worker${path}`, { method: body === undefined ? "GET" : "POST", headers: { Authorization: `Bearer ${credential}`, "Content-Type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const snapshot = async () => { const response = await user.get(`/api/camp/rooms/${room.id}`); assert.equal(response.status, 200); return await response.json() as Snapshot; };
   const submit = async (input: { title: string; role?: string; dependsOn?: string[]; budget?: Partial<CampBudget> }) => {
-    const response = await user.request(`/api/camp/rooms/${room.id}/tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+    const response = await user.request(`/api/camp/rooms/${room.id}/tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...input, workflow: "legacy" }) });
     assert.equal(response.status, 201, await response.clone().text());
     return await response.json() as Snapshot;
   };
@@ -41,6 +41,70 @@ async function fixture({ seed, http, app }: { seed: ReturnType<typeof createSeed
   };
   return { owner, server, channel, user, room, token, tokenId, worker, snapshot, submit, claim, complete };
 }
+
+apiTest("Camp exact terminal completion replays after channel archival without reopening execution or writing another event", async ({ db, seed, http, app }) => {
+  const kit = await fixture({ seed, http, app }); await kit.submit({ title: "Completed before archival", role: "planner" });
+  const run = (await kit.claim())!;
+  const payload = { workerId: "worker-a", epoch: run.epoch, status: "completed", summary: "The acknowledged result" };
+  const first = await kit.worker(`/runs/${run.id}/complete`, payload); assert.equal(first.status, 200, await first.clone().text());
+  const eventsBefore = (await db.select().from(campEvents).where(eq(campEvents.runId, run.id))).length;
+  await db.update(channels).set({ archivedAt: new Date() }).where(eq(channels.id, kit.channel.id));
+  const replay = await kit.worker(`/runs/${run.id}/complete`, payload); assert.equal(replay.status, 200, await replay.clone().text()); assert.equal((await replay.json() as { replayed: boolean }).replayed, true);
+  const different = await kit.worker(`/runs/${run.id}/complete`, { ...payload, summary: "Different" }); assert.equal(different.status, 409);
+  assert.equal((await db.select().from(campEvents).where(eq(campEvents.runId, run.id))).length, eventsBefore);
+  await db.update(campRuns).set({ leaseExpiresAt: sql`clock_timestamp() - interval '1 second'` }).where(eq(campRuns.id, run.id));
+  assert.equal((await kit.worker(`/runs/${run.id}/complete`, payload)).status, 200);
+  await db.update(campWorkerTokens).set({ revokedAt: new Date() }).where(eq(campWorkerTokens.id, kit.tokenId));
+  assert.equal((await kit.worker(`/runs/${run.id}/complete`, payload)).status, 401, "Exact replay still needs a valid host credential");
+});
+
+apiTest("Camp freezes the original completion independently of later report projection and preserves historical hashless replays", async ({ db, seed, http, app }) => {
+  const kit = await fixture({ seed, http, app }); await kit.submit({ title: "Durable original completion", role: "planner" });
+  const run = (await kit.claim())!;
+  const annotation = { type: "file", details: { z: [1, 2], a: "original" } };
+  const payload = { workerId: "worker-a", epoch: run.epoch, status: "completed", summary: "Saved original request", artifacts: [annotation] };
+  assert.equal((await kit.worker(`/runs/${run.id}/complete`, payload)).status, 200);
+  const [saved] = await db.select().from(campRuns).where(eq(campRuns.id, run.id)); assert.match(saved.completionPayloadHash!, /^[a-f0-9]{64}$/);
+  // Simulate retained/backfilled events and a changed projection window. These
+  // are not new facts in the already-committed original request.
+  await db.insert(campEvents).values(Array.from({ length: 32 }, (_, index) => ({ roomId: kit.room.id, runId: run.id, type: "historical_annotation", content: `Historical ${index}`, artifact: { type: "file", path: `historical-${index}` } })));
+  const eventCount = (await db.select().from(campEvents).where(eq(campEvents.runId, run.id))).length;
+  const reordered = { artifacts: [{ details: { a: "original", z: [1, 2] }, type: "file" }], summary: payload.summary, status: "completed", epoch: run.epoch, workerId: "worker-a" };
+  const replay = await kit.worker(`/runs/${run.id}/complete`, reordered); assert.equal(replay.status, 200, await replay.clone().text()); assert.equal((await replay.json() as { replayed: boolean }).replayed, true);
+  assert.equal((await kit.worker(`/runs/${run.id}/complete`, { ...payload, artifacts: [{ ...annotation, details: { ...annotation.details, z: [2, 1] } }] })).status, 409);
+  assert.equal((await db.select().from(campEvents).where(eq(campEvents.runId, run.id))).length, eventCount);
+  await db.update(campRuns).set({ completionPayloadHash: null }).where(eq(campRuns.id, run.id));
+  assert.equal((await kit.worker(`/runs/${run.id}/complete`, payload)).status, 200, "Historical rows use their final stored facts, not the latest event window");
+  assert.equal((await kit.worker(`/runs/${run.id}/complete`, { ...payload, artifacts: [...payload.artifacts, { type: "file", path: "new" }] })).status, 409);
+  const [legacy] = await db.select().from(campRuns).where(eq(campRuns.id, run.id)); assert.equal(legacy.completionPayloadHash, null, "Do not invent a historical raw request hash");
+});
+
+apiTest("Camp reconciliation isolates a real conversion-fenced Room and rotates its cursor while other leases expire", async ({ db, seed, http, app }) => {
+  const poisoned = await fixture({ seed, http, app }), healthy = await fixture({ seed, http, app });
+  await poisoned.submit({ title: "Conversion is temporarily fenced", role: "planner" });
+  await healthy.submit({ title: "Lease still needs reconciliation", role: "planner" }); const run = (await healthy.claim())!;
+  await db.update(campRuns).set({ leaseExpiresAt: sql`clock_timestamp() - interval '1 second'` }).where(eq(campRuns.id, run.id));
+  await db.update(campRooms).set({ reconciledAt: new Date(0) }).where(eq(campRooms.id, healthy.room.id));
+  const [job] = await db.insert(channelConversionJobs).values({ serverId: poisoned.server.id, sourceChannelId: poisoned.channel.id, sourceChannelType: "channel" }).returning();
+  await db.insert(channelConversionFences).values({ jobId: job.id, serverId: poisoned.server.id, sourceChannelId: poisoned.channel.id, conversionEpoch: job.conversionEpoch });
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const changed: string[] = [];
+    assert.equal(await reconcileCampPass(async room => { changed.push(room.id); }), 1);
+    assert.deepEqual(changed, [healthy.room.id]);
+    assert.equal((await db.select().from(campRuns).where(eq(campRuns.id, run.id)))[0].status, "failed");
+    const [failedRoom] = await db.select().from(campRooms).where(eq(campRooms.id, poisoned.room.id)); assert.ok(failedRoom.reconciledAt, "Failed rooms must not monopolize the oldest scan slot");
+    assert.ok(errors.mock.calls.length > 0);
+  } finally { errors.mockRestore(); }
+});
+
+apiTest("Camp reconciliation notification errors do not stop the remaining committed Room transitions", async ({ seed, http, app }) => {
+  const first = await fixture({ seed, http, app }), second = await fixture({ seed, http, app });
+  await first.submit({ title: "First", role: "planner" }); await second.submit({ title: "Second", role: "planner" });
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {}); let notifications = 0;
+  try { assert.equal(await reconcileCampPass(async () => { notifications++; throw new Error("Socket delivery unavailable"); }), 2); assert.equal(notifications, 2); }
+  finally { errors.mockRestore(); }
+});
 
 apiTest("Camp review budget stops rework, manual retry keeps attempt evidence and CAS prevents a duplicate generation", async ({ seed, http, app }) => {
   const kit = await fixture({ seed, http, app });

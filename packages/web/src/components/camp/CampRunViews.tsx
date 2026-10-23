@@ -4,6 +4,7 @@ import { Bot, CheckCircle2, LoaderCircle, Square } from "lucide-react";
 import { Button } from "@botiverse/raft-ui";
 import type { CampArtifact, CampRole, CampRun, CampTask } from "./campApi";
 import { campTaskStatusLabel, leaseExpired } from "./campStatus";
+import CampCandidateReference, { candidateRefId, candidateRefLabel } from "./CampCandidateReference";
 
 export function CampRoleCard({ role, runs, canCancel, busy, onCancel }: {
   role: CampRole;
@@ -14,8 +15,8 @@ export function CampRoleCard({ role, runs, canCancel, busy, onCancel }: {
 }) {
   const { formatMessage: t } = useIntl();
   // The API returns attempts newest first. A running attempt takes precedence.
-  const current = runs.find(run => run.role === role && run.status === "running");
-  const latest = current ?? runs.find(run => run.role === role);
+  const current = runs.find(run => (!run.executor || run.executor === "agent") && run.role === role && run.status === "running");
+  const latest = current ?? runs.find(run => (!run.executor || run.executor === "agent") && run.role === role);
   const expired = leaseExpired(current);
   const cancel = useCallback(() => {
     if (current) void onCancel(current.id);
@@ -78,10 +79,9 @@ function CampArtifactDetails({ artifact }: { artifact: CampArtifact }) {
   const fields = [
     ["camp.artifactPath", artifact.path],
     ["camp.branch", artifact.branch],
-    ["camp.commit", artifact.commitId],
+    [candidateRefLabel(artifact), candidateRefId(artifact)],
     ["camp.sandbox", artifact.sandboxId],
     ["camp.reviewProject", artifact.candidate?.projectId],
-    ["camp.reviewCandidate", artifact.candidate?.commitId],
   ] as const;
   return (
     <div className="mt-3 min-w-0 border-t border-border-default pt-3">
@@ -91,6 +91,7 @@ function CampArtifactDetails({ artifact }: { artifact: CampArtifact }) {
         {fields.map(([label, value]) => value && (
           <div key={label}><dt className="inline">{t({ id: label })}: </dt><dd className="inline break-all font-mono">{value}</dd></div>
         ))}
+        {artifact.candidate && candidateRefId(artifact.candidate) && <div><dt className="inline">{t({ id: "camp.reviewCandidate" })}: </dt><dd className="inline"><CampCandidateReference candidate={artifact.candidate} /></dd></div>}
         {artifact.evidence && <div><dt className="font-medium">{t({ id: "camp.evidence" })}</dt><dd className="mt-1 whitespace-pre-wrap break-words">{Array.isArray(artifact.evidence) ? artifact.evidence.join("\n") : artifact.evidence}</dd></div>}
       </dl>
     </div>
@@ -107,7 +108,7 @@ export function CampRunResults({ runs }: { runs: CampRun[] }) {
       <div className="flex flex-col gap-3">
         {results.map(run => (
           <article key={run.id} className="min-w-0 rounded-xl border border-border-default p-4">
-            <p className="mb-2 text-sm font-medium">{t({ id: `camp.role.${run.role}` })} · {t({ id: "camp.attempt" }, { epoch: run.epoch })}</p>
+            <p className="mb-2 text-sm font-medium">{t({ id: run.executor === "integration" ? "camp.integration.systemOperation" : run.executor === "verification" ? "camp.verification.systemOperation" : run.role === null ? "camp.integration.unknownSystemOperation" : `camp.role.${run.role}` })} · {t({ id: "camp.attempt" }, { epoch: run.epoch })}</p>
             {run.outcome && <p className="mb-2 text-sm font-medium">{t({ id: `camp.outcome.${run.outcome}` })}</p>}
             {run.cleanupState === "unknown" && <p className="mb-2 text-xs text-foreground-hint">{t({ id: "camp.cleanupUnknown" })}</p>}
             {run.summary && <p className="whitespace-pre-wrap break-words text-sm text-foreground-secondary">{run.summary}</p>}

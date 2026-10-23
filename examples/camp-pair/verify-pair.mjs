@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import { normalizeName } from '/workspace/normalizer/index.js';
+import { formatCount } from '/workspace/formatter/index.js';
+assert.equal(normalizeName('  ALAN\t TURING\n'), 'alan turing');
+assert.equal(normalizeName('  '), '');
+assert.throws(() => normalizeName(null), TypeError);
+assert.equal(formatCount(1), '1 item');
+assert.equal(formatCount(12), '12 items');
+for (const value of [undefined, null, -5, 3.5, Infinity]) assert.throws(() => formatCount(value), RangeError);
+console.log('Both independently implemented modules passed the external contract');

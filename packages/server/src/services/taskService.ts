@@ -1,3 +1,4 @@
+import { assertCampTaskMutation } from "./camp/taskAuthority";
 import { conversionReadChannelIdsQuery, conversionReadChannelPredicate } from "./channelConversionReadScope";
 import { withChannelWriterFence, assertChannelWritableInTransaction } from "./channelConversionFenceService";
 import { randomUUID } from "node:crypto";
@@ -50,6 +51,12 @@ export class TaskMutationConflictError extends Error {
 async function withTaskWriter<T>(observed: TaskRow, work: (tx: DatabaseExecutor) => Promise<T>): Promise<T> {
   return withChannelWriterFence(observed.channelId, async (tx) => {
     const [current] = await tx.select({ channelId: tasks.channelId }).from(tasks).where(eq(tasks.id, observed.id)).limit(1);
+    // Camp ownership is inserted with the NEW canonical task in the same
+    // transaction and is immutable: there is no attach-existing-task API.
+    // Rechecking here cannot race a public ordinary task becoming Camp-owned.
+    // Keep the existing identity -> task lock order in nested writers; taking
+    // a task row lock here would invert amendment versus agent deletion.
+    await assertCampTaskMutation(tx, observed.id);
     if (current && current.channelId !== observed.channelId) throw new TaskMutationConflictError();
     return work(tx);
   });
@@ -2191,6 +2198,7 @@ export async function assignTask(
   const owner = await resolveTaskById(taskId);
   if (!owner) return "task not found";
   const observed = owner.row;
+  await assertCampTaskMutation(getDb(), taskId);
 
   if (opts.expectedRevision !== undefined && opts.expectedRevision !== observed.revision) {
     return "task state changed concurrently";
@@ -2602,6 +2610,7 @@ async function writeCanonicalClaim(
   claimedByType: "user" | "agent",
   claimedById: string,
 ): Promise<TaskRow | TaskClaimRejection> {
+  await assertCampTaskMutation(executor, observed.id);
   const rejection = await describeTaskClaimRejection(
     executor,
     canonicalClaimShape(observed),
@@ -2741,6 +2750,7 @@ async function writeCanonicalStatus(
   newStatus: TaskStatus,
   opts: { requesterId?: string; requesterType?: "user" | "agent"; force?: boolean },
 ): Promise<TaskRow | string> {
+  await assertCampTaskMutation(getDb(), observed.id);
   const previousStatus = observed.status as TaskStatus;
   const force = opts.force === true;
 

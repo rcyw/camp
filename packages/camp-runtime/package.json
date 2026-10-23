@@ -1,6 +1,6 @@
 {
   "name": "@camp/runtime",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "exports": "./src/index.mjs",
@@ -8,6 +8,9 @@
     "build:layerfs": "node scripts/build-layerfs.mjs",
     "build:image": "node scripts/build-image.mjs",
     "test:real": "node scripts/verify-layerfs.mjs",
-    "worker": "node --import @oxc-node/core/register src/worker.mjs"
+    "worker": "node --import @oxc-node/core/register src/worker.mjs",
+    "build:bundle": "node scripts/build-bundle.mjs",
+    "build:dsh": "node scripts/pack-dsh.mjs --install",
+    "doctor": "node scripts/doctor.mjs"
   }
 }

@@ -1,0 +1,47 @@
+import assert from 'node:assert/strict';
+import { writeFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { CampRuntime } from '../src/index.mjs';
+import { checkedRunPolicy, completionPolicy } from '../src/run-policy.mjs';
+
+const runtime = await new CampRuntime().ready();
+const stamp = Date.now();
+const project = await runtime.prepareProject({ projectId: `input-policy-proof-${stamp}` });
+const plan = { revision: 1, summary: 'One concrete item', tasks: [{ key: 'one', title: 'Implement', description: 'Add a file', acceptance: 'File is correct', verification: 'Inspect the file' }] };
+let run;
+try {
+  const initial = { workflow: 'serial', taskKind: 'plan', inputCandidate: null, baseRef: 'main' };
+  checkedRunPolicy(initial, project);
+  run = await runtime.prepareRun({ project, runId: `initial-plan-${stamp}`, roleId: 'planner', baseRef: initial.baseRef });
+  const baseline = await runtime.pinInputCandidate(run, null);
+  assert.equal(baseline.refKind, 'layer');
+  assert.match(baseline.refId, /^32[a-f0-9]{64}$/);
+  assert.equal(baseline.commitId, undefined);
+  assert.equal(run.baseRef, baseline.refId);
+  assert.equal(run.forkRef, 'main');
+  const cleanPlan = await runtime.commitCandidate(run);
+  assert.deepEqual(completionPolicy(initial, { plan }, baseline, cleanPlan), { status: 'completed' });
+  const noOpReview = { ...cleanPlan, baseRef: baseline.refId };
+  for (const kind of ['build', 'review', 'final_review']) assert.deepEqual(completionPolicy({ workflow: 'serial', taskKind: kind }, { plan, review: { outcome: 'approved', evidence: 'Existing files satisfy the requirement' } }, baseline, noOpReview), kind === 'build' ? { status: 'completed' } : { status: 'completed', outcome: 'approved' });
+  assert.deepEqual(completionPolicy({ workflow: 'serial', taskKind: 'summary' }, { plan, finalization: { summary: 'Existing files verified', evidence: null, remaining: [] } }, baseline, noOpReview), { status: 'completed' });
+  assert.equal((await runtime.exec(run, 'printf unauthorized > unexpected-implementation.txt')).exitCode, 0);
+  const changedPlan = await runtime.commitCandidate(run);
+  assert.throws(() => completionPolicy(initial, { plan }, baseline, changedPlan), /readonly_workspace_changed/);
+  await runtime.releaseRun(run);
+  run = await runtime.prepareRun({ project, runId: `explicit-build-${stamp}`, roleId: 'builder', baseRef: baseline.refId });
+  const supplied = await runtime.pinInputCandidate(run, baseline);
+  assert.equal(supplied.refId, baseline.refId, 'A checkpoint may not replace the supplied authority identity');
+  assert.equal((await runtime.exec(run, 'printf partial > partial-build.txt')).exitCode, 0);
+  const partial = await runtime.commitCandidate(run);
+  assert.deepEqual(completionPolicy({ id: 'current-run', workflow: 'serial', taskKind: 'build' }, { blockingQuestion: { id: 'durable-question', status: 'pending', activeRunId: 'current-run' } }, supplied, partial), { status: 'suspended', questionId: 'durable-question' });
+  await runtime.releaseRun(run);
+  run = null;
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const output = `${root}/.local/layer-baseline-export-${stamp}`;
+  await promisify(execFile)(process.execPath, [`${root}/scripts/export.mjs`, '--project', baseline.projectId, '--layer', baseline.refId, '--root', baseline.rootId, '--output', output], { env: { ...process.env, CAMP_RUNTIME_HOME: runtime.home }, timeout: 30_000 });
+  const receipt = { at: new Date().toISOString(), baseline: { projectId: baseline.projectId, refKind: baseline.refKind, refId: baseline.refId, rootId: baseline.rootId }, initialPlannerGuarded: true, providedInputIdentityPreserved: true, noOpBuildReviewAccepted: true, immutableLayerExported: true, partialBuildCandidate: { refKind: partial.refKind, refId: partial.refId, rootId: partial.rootId }, suspensionPolicyVerified: true, modelCalled: false };
+  await writeFile(fileURLToPath(new URL('../.local/input-policy-proof.json', import.meta.url)), JSON.stringify(receipt, null, 2));
+  console.log(JSON.stringify(receipt));
+} finally { if (run) await runtime.abortRun(run, 'input_policy_proof_cleanup'); }

@@ -1,4 +1,3 @@
-import { hostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -8,17 +7,29 @@ import { WorkerJournal, acquireWorkerLock, runTokenForClaim } from './durable-st
 import { recoverWorker, dispatchOutbox, checkedState } from './worker-recovery.mjs';
 import { createModelProxy } from './model-proxy.mjs';
 import { ModelBudget, RunLimitError, runLimits } from './run-limits.mjs';
+import { checkedRunPolicy, completionPolicy, controlledTurnResult, completionSummary } from './run-policy.mjs';
+import { negotiateWorker, assertClaimCompatibility, protocolFailure, unmatchedTaskKind } from './worker-protocol.mjs';
+import { parseCandidate, parseIntegrationInput, parseIntegrationReport } from '../../camp-protocol/src/index.js';
+import { createChangeSet } from './change-set.mjs';
+import { runTrustedVerification } from './verification.mjs';
+import { inspectWorker, workerApiRequest, workerApiUrl, workerIdForEnvironment } from './worker-preflight.mjs';
+import { resourcePolicy, storageCapacity } from './resource-policy.mjs';
+import { runTrustedIntegration } from './integration.mjs';
+import { integrationCompletion } from './integration-completion.mjs';
 
 const transient = error => !['camp_journal_io', 'camp_journal_invalid'].includes(error.code) && (!error.status || error.status >= 500 || [408, 429].includes(error.status));
 export async function startWorker(options = {}) {
   const env = options.env ?? process.env;
-  const apiUrl = (env.CAMP_API_URL ?? 'http://127.0.0.1:3001').replace(/\/$/, '');
-  const workerToken = env.CAMP_WORKER_TOKEN;
-  const workerId = env.CAMP_WORKER_ID ?? `camp-${hostname()}`;
+  const apiConfiguration = { CAMP_API_URL: env.CAMP_API_URL, CAMP_WORKER_TOKEN: env.CAMP_WORKER_TOKEN };
+  const apiUrl = workerApiUrl(apiConfiguration);
+  const workerToken = apiConfiguration.CAMP_WORKER_TOKEN;
+  const workerId = workerIdForEnvironment(env);
   if (!workerToken) throw new Error('CAMP_WORKER_TOKEN is required; obtain it from the Room worker-token endpoint');
-  if (!env.DEEPSEEK_API_KEY) throw new Error('DEEPSEEK_API_KEY is required before claiming tasks');
-  const limits = runLimits(env);
-  const runtime = options.runtime ?? await new CampRuntime().ready();
+  let limits;
+  const heartbeatIntervalMs = options.heartbeatIntervalMs ?? 8000;
+  if (!Number.isSafeInteger(heartbeatIntervalMs) || heartbeatIntervalMs <= 0 || heartbeatIntervalMs > 10000) throw new Error('Heartbeat interval must be a positive integer at most 10000ms');
+  const runtime = options.runtime ?? new CampRuntime();
+  const pluginPath = env.CAMP_DSH_PLUGIN ?? fileURLToPath(new URL('../../dsh-plugin', import.meta.url));
   const log = options.log ?? (entry => console.log(JSON.stringify(entry)));
   let stopping = false;
   let activeAbort;
@@ -29,120 +40,85 @@ export async function startWorker(options = {}) {
   try {
     lock = await acquireWorkerLock(workerId, { onLost: error => { stopping = true; activeAbort?.abort(error); } });
     const journal = options.journal ?? await new WorkerJournal({ home: runtime.home, apiUrl, workerId }).ready();
-    const request = options.request ?? (async (path, body) => {
-      let response;
-      try { response = await fetch(`${apiUrl}/api/camp/worker${path}`, {
-        method: body === undefined ? 'GET' : 'POST',
-        headers: { authorization: `Bearer ${workerToken}`, 'content-type': 'application/json' },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(10_000),
-      }); } catch (error) { throw Object.assign(new Error(`Camp worker API transport failed at ${path.split('?')[0]}`), { code: 'camp_api_transport', cause: error }); }
-      if (!response.ok) throw Object.assign(new Error(`Camp worker API ${response.status} at ${path.split('?')[0]}`), { status: response.status });
-      try { return await response.json(); }
-      catch (error) { throw Object.assign(new Error(`Camp worker API response was interrupted at ${path.split('?')[0]}`), { code: 'camp_api_transport', cause: error }); }
+    const request = options.request ?? workerApiRequest(apiConfiguration);
+    let createSession = options.createSession;
+    const computeChangeSet = options.createChangeSet ?? createChangeSet;
+    const verifyCandidate = options.verifyCandidate ?? runTrustedVerification;
+    const integrateCandidates = options.integrateCandidates ?? runTrustedIntegration;
+    const checkCapacity = options.checkCapacity ?? (() => storageCapacity(runtime, runtime.resourcePolicy ?? resourcePolicy(env)));
+    let checkedProjectDigest;
+    const admitExecution = options.admitExecution ?? (async () => {
+      const setup = await request('/setup');
+      if (!checkedProjectDigest || setup.projectDigest !== checkedProjectDigest) {
+        const checked = await inspectWorker({ runtime, env: { ...env, CAMP_WORKER_ID: workerId }, request, report: true, setup, localChecks: options.preflightChecks, capacity: checkCapacity });
+        log({ event: 'worker_preflight', workerId, ready: checked.ready, report: checked.report });
+        if (!checked.ready) {
+          if (checked.apiFailure) throw Object.assign(new Error(checked.apiFailure.retryable ? 'Worker preflight API is temporarily unavailable; no task was allocated' : 'Worker preflight API authentication or compatibility failed; no task was allocated'), checked.apiFailure);
+          throw Object.assign(new Error('Worker prerequisites failed before task allocation; run doctor and correct the reported checks'), { code: 'camp_preflight_failed', status: 409 });
+        }
+        checkedProjectDigest = setup.projectDigest;
+      }
     });
-    const createSession = options.createSession ?? (await import('../../daemon/src/drivers/dshAcp.ts')).createDshRuntimeSession;
 
-    async function executeRun(claim, record) {
+    async function executeRun(claim, record, harnesses) {
       const controller = new AbortController();
       activeAbort = controller;
       const timeout = setTimeout(() => controller.abort(new RunLimitError('Run wall-clock deadline exceeded')), Math.max(1, Date.parse(record.deadlineAt) - Date.now()));
       let run, session, modelProxy, heartbeat, closed = false;
+      let promptActive = false, turnFinished = false, controlledYield, finishTurn, sessionStop;
+      const stopSession = async () => {
+        if (!session) return;
+        sessionStop ??= Promise.resolve().then(() => session.stop());
+        await sessionStop;
+      };
       let heartbeatWork = Promise.resolve();
       let text = '', sessionId, failure;
       let progress = Promise.resolve();
       const context = { workerId: record.workerId, epoch: record.epoch };
       const emitProgress = content => {
         progress = progress.then(() => {
-          if (closed || controller.signal.aborted) return;
+          if (closed || controlledYield || controller.signal.aborted) return;
           return request(`/runs/${claim.id}/events`, { ...context, type: 'progress', content });
         }).catch(error => { failure ??= error; controller.abort(error); });
       };
       const lease = new LeaseGuard({
         heartbeat: async () => {
+          await checkCapacity();
           const result = await request(`/runs/${claim.id}/heartbeat`, context);
           await journal.update(record, { leaseExpiresAt: result.run.leaseExpiresAt });
           return result;
         },
-        onStop: async error => { controller.abort(error); try { await session?.stop(); } catch (stopError) { failure ??= stopError; } },
+        onStop: async error => { controller.abort(error); try { await stopSession(); } catch (stopError) { failure ??= stopError; } },
       });
       const renew = () => {
         heartbeatWork = (async () => {
           await lease.refresh();
-          if (!closed && lease.state === 'active') heartbeat = setTimeout(renew, 8_000);
-        })();
+          if (!closed && lease.state === 'active' && promptActive && !turnFinished && claim.workflow === 'serial') {
+            const liveContext = await request(`/runs/${claim.id}/context`);
+            if (!closed && promptActive && !turnFinished) {
+              const result = controlledTurnResult(claim, liveContext);
+              if (result) {
+                controller.signal.throwIfAborted();
+                if (failure) throw failure;
+                controlledYield = result;
+                promptActive = false;
+                log({ event: 'controlled_yield', runId: claim.id, epoch: claim.epoch, reason: result.kind, questionId: result.question.id });
+                // The model does not own this scheduling decision. Wait for ACP
+                // and its process to be quiescent before taking any snapshot.
+                await stopSession();
+                await lease.refresh();
+                lease.assertActive();
+                controller.signal.throwIfAborted();
+                turnFinished = true;
+                finishTurn();
+              }
+            }
+          }
+          if (!closed && lease.state === 'active') heartbeat = setTimeout(renew, heartbeatIntervalMs);
+        })().catch(error => { controller.abort(error); });
         return heartbeatWork;
       };
-      try {
-        await renew();
-        controller.signal.throwIfAborted();
-        await journal.update(record, { phase: 'preparing' });
-        const project = await runtime.prepareProject({ projectId: `room:${claim.roomId}`, name: claim.project?.name, sourcePath: claim.project?.repoPath });
-        const candidates = (claim.dependencies ?? []).flatMap(task => task.artifacts ?? []).filter(artifact => artifact.type === 'layerfs' && artifact.commitId);
-        const inherited = candidates.findLast(artifact => artifact.role === 'builder') ?? candidates.at(-1);
-        const baseRef = inherited?.commitId ?? claim.project?.baseRef ?? 'main';
-        run = await runtime.prepareRun({ project, runId: record.runtime.runId, roleId: claim.role, baseRef, owner: { apiUrl, workerId, runId: claim.id, epoch: claim.epoch } });
-        await journal.update(record, { phase: 'prepared', runtime: { ...record.runtime, containerId: run.containerId } });
-        controller.signal.throwIfAborted();
-        await runtime.installDsh(run);
-        await runtime.installPlugin(run, env.CAMP_DSH_PLUGIN ?? fileURLToPath(new URL('../../dsh-plugin', import.meta.url)));
-        const sandboxApi = await runtime.sandboxApiUrl(run, apiUrl);
-        modelProxy = await createModelProxy({
-          apiKey: env.DEEPSEEK_API_KEY, baseUrl: env.DEEPSEEK_BASE_URL, host: new URL(sandboxApi).hostname,
-          budget: new ModelBudget(limits),
-          onBudget: async counters => { try { await journal.update(record, { modelUsage: counters }); } catch (error) { controller.abort(error); throw error; } },
-          onLimit: error => controller.abort(error),
-        });
-        const launch = runtime.launchSpec(run, { env: {
-          DEEPSEEK_API_KEY: modelProxy.token, DEEPSEEK_BASE_URL: modelProxy.baseUrl,
-          CAMP_API_URL: sandboxApi, CAMP_ROOM_ID: claim.roomId, CAMP_RUN_ID: claim.id,
-          CAMP_RUN_EPOCH: String(claim.epoch), CAMP_WORKER_ID: workerId, CAMP_RUN_TOKEN: claim.runToken,
-          DSH_PERMISSION_MODE: 'danger-full-access',
-        } });
-        session = createSession({ ...launch, cwd: run.workspacePath, processCwd: process.cwd(), model: env.CAMP_DSH_MODEL ?? 'profile', approvePermissions: true, signal: controller.signal, handshakeTimeoutMs: 30_000 });
-        const settled = new Promise((resolveTurn, reject) => {
-          controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true });
-          session.on('runtime_event', event => {
-            if (event.kind === 'text') { text = (text + event.text).slice(-200_000); for (const chunk of splitProgress(event.text)) emitProgress(chunk); }
-            if (event.kind === 'session_init') sessionId = event.sessionId;
-            if (event.kind === 'error') failure = new Error(event.message);
-            if (event.kind === 'turn_end') failure ? reject(failure) : resolveTurn();
-          });
-          session.on('error', reject);
-          session.on('exit', () => reject(new Error('DSH exited before a completed turn')));
-        });
-        settled.catch(() => {});
-        await journal.update(record, { phase: 'executing' });
-        log({ event: 'run_started', runId: claim.id, epoch: claim.epoch, role: claim.role });
-        emitProgress(`${claim.role} started in an isolated LayerFS workspace.`);
-        const started = await session.start({ text: claim.prompt });
-        if (!started.ok) throw new Error(`DSH did not accept the task: ${started.error ?? 'no error detail'}`);
-        await settled;
-        await session.stop();
-        session = null;
-        await modelProxy.close();
-        modelProxy = null;
-        await runtime.archiveSession(run);
-        lease.assertActive();
-        controller.signal.throwIfAborted();
-        const endContext = await request(`/runs/${claim.id}/context`);
-        const review = endContext.review ?? endContext.run?.review;
-        const evidence = review?.evidence;
-        const validEvidence = typeof evidence === 'string' ? evidence.trim() : Array.isArray(evidence) && evidence.length && evidence.every(item => typeof item === 'string' && item.trim());
-        if (claim.role === 'reviewer' && (!review || !['approved', 'changes_requested'].includes(review.outcome) || !validEvidence)) throw new Error('Reviewer did not record a structured verdict with evidence through camp_review');
-        const artifact = { ...await runtime.commitCandidate(run), runId: claim.id, runtimeRunId: run.runId };
-        await journal.update(record, { phase: 'candidate', candidate: artifact });
-        if (claim.role === 'reviewer' && review.outcome === 'approved' && (!inherited?.rootId || artifact.rootId !== inherited.rootId)) throw new Error('review_candidate_changed: approval workspace root differs from the builder candidate');
-        await progress;
-        controller.signal.throwIfAborted();
-        const summary = text.trim().slice(0, 15000) || 'DSH completed the task and saved a LayerFS candidate.';
-        const artifacts = [artifact, ...(claim.role === 'reviewer' && inherited ? [inherited] : []), ...(endContext.artifacts ?? [])].slice(0, 30);
-        const completion = { ...context, status: 'completed', summary, artifacts, ...(sessionId ? { sessionId } : {}), ...(claim.role === 'reviewer' ? { outcome: review.outcome } : {}) };
-        await journal.stageCompletion(record, completion);
-        log({ event: 'result_staged', runId: claim.id, epoch: claim.epoch });
-        await request(`/runs/${claim.id}/events`, { ...context, type: 'artifact', content: 'Saved immutable LayerFS candidate.', artifact });
-        await runtime.releaseRun(run);
-        run = null;
+      const finishCleaned = async completion => {
         await journal.update(record, { cleanupKnown: true, phase: 'cleaned' });
         controller.signal.throwIfAborted();
         lease.assertActive();
@@ -151,13 +127,139 @@ export async function startWorker(options = {}) {
         closed = true;
         clearTimeout(heartbeat);
         const state = checkedState(await request(`/runs/${claim.id}/state`), record);
-        const outcome = await dispatchOutbox({ journal, record, request, state, log });
-        if (outcome === 'settled') log({ event: 'completed', runId: claim.id, epoch: claim.epoch, role: claim.role, commitId: artifact.commitId });
+        return dispatchOutbox({ journal, record, request, state, log });
+      };
+      try {
+        await renew();
+        controller.signal.throwIfAborted();
+        await journal.update(record, { phase: 'preparing' });
+        const project = await runtime.prepareProject({ projectId: `room:${claim.roomId}`, name: claim.project?.name, sourcePath: claim.project?.repoPath, signal: controller.signal });
+        if (claim.executor === 'integration') {
+          const integrationInput = parseIntegrationInput(claim.integrationInput);
+          parseCandidate(integrationInput.base, { projectId: project.projectId, imageId: project.imageId });
+          if (['projectId', 'imageId', 'refKind', 'refId', 'rootId'].some(key => integrationInput.base[key] !== claim.inputCandidate?.[key])) throw new Error('Integration claim changed its frozen baseline');
+          await journal.update(record, { phase: 'integration_preparing', integrationInput });
+          const stage = async value => {
+            controller.signal.throwIfAborted(); lease.assertActive();
+            const integrationReport = parseIntegrationReport(value);
+            const integrationChangeSet = integrationReport.status === 'merged' ? await computeChangeSet({ runtime, ownerRun: record.runtime, base: integrationInput.base, target: integrationReport.candidate, signal: controller.signal }) : undefined;
+            controller.signal.throwIfAborted(); lease.assertActive();
+            await journal.update(record, { phase: 'integration_result_recorded', integrationReport, ...(integrationChangeSet ? { integrationChangeSet } : {}) });
+            await journal.stageCompletion(record, integrationCompletion(record));
+            log({ event: 'result_staged', runId: claim.id, epoch: claim.epoch, executor: 'integration', result: integrationReport.status });
+          };
+          log({ event: 'run_started', runId: claim.id, epoch: claim.epoch, executor: 'integration', operationId: claim.operationId });
+          const report = await integrateCandidates({ runtime, ownerRun: record.runtime, integrationInput, signal: controller.signal, onIntent: async () => { controller.signal.throwIfAborted(); lease.assertActive(); await journal.update(record, { phase: 'integrating' }); }, onResult: stage });
+          if (!record.completion) await stage(report);
+          await runtime.cleanupAttempt(record.runtime.prefix);
+          const outcome = await finishCleaned(record.completion.payload);
+          if (outcome === 'settled') log({ event: 'completed', runId: claim.id, epoch: claim.epoch, executor: 'integration', result: record.integrationReport.status });
+          return;
+        }
+        if (claim.executor === 'verification') {
+          const inputCandidate = parseCandidate(claim.inputCandidate, { projectId: project.projectId, imageId: project.imageId });
+          let completion;
+          const stage = async verification => {
+            controller.signal.throwIfAborted(); lease.assertActive();
+            completion = { ...context, status: 'completed', summary: `Trusted verification finished: ${verification.checks.map(check => check.id).join(', ')}. The server determines the policy result.`, inputCandidate, verification };
+            await journal.stageCompletion(record, completion);
+            log({ event: 'result_staged', runId: claim.id, epoch: claim.epoch, executor: 'verification' });
+          };
+          await journal.update(record, { phase: 'verifying', inputCandidate });
+          log({ event: 'run_started', runId: claim.id, epoch: claim.epoch, executor: 'verification', operationId: claim.operationId });
+          const report = await verifyCandidate({ runtime, ownerRun: record.runtime, candidate: inputCandidate, verificationPolicy: claim.verificationPolicy, harnesses, signal: controller.signal, onResult: stage });
+          if (!completion) await stage(report);
+          await runtime.cleanupAttempt(record.runtime.prefix);
+          const outcome = await finishCleaned(completion);
+          if (outcome === 'settled') log({ event: 'completed', runId: claim.id, epoch: claim.epoch, executor: 'verification' });
+          return;
+        }
+        if (!env.DEEPSEEK_API_KEY) throw new Error('Agent execution requires a configured model key');
+        const requestedInput = checkedRunPolicy(claim, project);
+        run = await runtime.prepareRun({ project, runId: record.runtime.runId, roleId: claim.role, baseRef: claim.baseRef, owner: { apiUrl, workerId, runId: claim.id, epoch: claim.epoch }, signal: controller.signal });
+        const inputCandidate = await runtime.pinInputCandidate(run, requestedInput, { signal: controller.signal });
+        await journal.update(record, { phase: 'prepared', inputCandidate, runtime: { ...record.runtime, containerId: run.containerId } });
+        controller.signal.throwIfAborted();
+        await runtime.installDsh(run);
+        await runtime.installPlugin(run, pluginPath);
+        const sandboxApi = await runtime.sandboxApiUrl(run, apiUrl);
+        modelProxy = await createModelProxy({
+          apiKey: env.DEEPSEEK_API_KEY, baseUrl: env.DEEPSEEK_BASE_URL, host: await runtime.sandboxHostAddress(run),
+          budget: new ModelBudget(limits),
+          onBudget: async counters => { try { await journal.update(record, { modelUsage: counters }); } catch (error) { controller.abort(error); throw error; } },
+          onLimit: error => controller.abort(error),
+        });
+        const launch = runtime.launchSpec(run, { env: {
+          DEEPSEEK_API_KEY: modelProxy.token, DEEPSEEK_BASE_URL: modelProxy.baseUrl,
+          CAMP_API_URL: sandboxApi, CAMP_ROOM_ID: claim.roomId, CAMP_RUN_ID: claim.id,
+          CAMP_RUN_EPOCH: String(claim.epoch), CAMP_WORKER_ID: workerId, CAMP_RUN_TOKEN: claim.runToken,
+          CAMP_PROTOCOL_VERSION: String(claim.protocolVersion ?? 1),
+          DSH_PERMISSION_MODE: 'danger-full-access',
+        } });
+        createSession ??= (await import('../../daemon/src/drivers/dshAcp.ts')).createDshRuntimeSession;
+        session = createSession({ ...launch, cwd: run.workspacePath, processCwd: process.cwd(), model: env.CAMP_DSH_MODEL ?? 'profile', approvePermissions: true, signal: controller.signal, handshakeTimeoutMs: 30_000 });
+        const settled = new Promise((resolveTurn, reject) => {
+          finishTurn = resolveTurn;
+          controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true });
+          session.on('runtime_event', event => {
+            if (event.kind === 'text') { text = (text + event.text).slice(-200_000); for (const chunk of splitProgress(event.text)) emitProgress(chunk); }
+            if (event.kind === 'session_init') sessionId = event.sessionId;
+            if (event.kind === 'error') failure = new Error(event.message);
+            if (event.kind === 'turn_end' && !controlledYield) { turnFinished = true; promptActive = false; if (failure) reject(failure); else resolveTurn(); }
+          });
+          session.on('error', error => { if (!sessionStop) reject(error); });
+          session.on('exit', () => { if (!sessionStop) reject(new Error('DSH exited before a completed turn')); });
+        });
+        settled.catch(() => {});
+        await journal.update(record, { phase: 'executing' });
+        log({ event: 'run_started', runId: claim.id, epoch: claim.epoch, role: claim.role });
+        emitProgress(`${claim.role} started in an isolated LayerFS workspace.`);
+        const started = await session.start({ text: claim.prompt });
+        if (!started.ok) throw new Error(`DSH did not accept the task: ${started.error ?? 'no error detail'}`);
+        promptActive = !turnFinished;
+        await settled;
+        promptActive = false;
+        await heartbeatWork;
+        await stopSession();
+        session = null;
+        controller.signal.throwIfAborted();
+        await runtime.quiesceAgent(run, { signal: controller.signal });
+        await modelProxy.close();
+        modelProxy = null;
+        const archive = await runtime.archiveSession(run, { signal: controller.signal });
+        if (archive) log({ event: 'session_archived', runId: claim.id, status: archive.status, retained: archive.retained, reason: archive.reason });
+        lease.assertActive();
+        controller.signal.throwIfAborted();
+        const endContext = await request(`/runs/${claim.id}/context`);
+        const artifact = { ...await runtime.commitCandidate(run, { signal: controller.signal }), runId: claim.id, runtimeRunId: run.runId };
+        await journal.update(record, { phase: 'candidate', candidate: artifact });
+        const result = completionPolicy(claim, endContext, inputCandidate, artifact);
+        await progress;
+        controller.signal.throwIfAborted();
+        const summary = completionSummary(claim, endContext, text);
+        const artifacts = [artifact, ...(endContext.artifacts ?? [])].slice(0, 30);
+        const completion = { ...context, ...result, inputCandidate, candidate: artifact, summary, artifacts, ...(sessionId ? { sessionId } : {}) };
+        if (claim.protocolVersion >= 2 && claim.taskKind === 'build') {
+          const base = parseCandidate(claim.goalBaseline ?? inputCandidate, { projectId: project.projectId, imageId: project.imageId });
+          completion.changeSet = await computeChangeSet({ runtime, ownerRun: record.runtime, base, target: artifact, signal: controller.signal });
+        }
+        await journal.stageCompletion(record, completion);
+        log({ event: 'result_staged', runId: claim.id, epoch: claim.epoch });
+        await request(`/runs/${claim.id}/events`, { ...context, type: 'artifact', content: 'Saved immutable LayerFS candidate.', artifact });
+        await runtime.releaseRun(run);
+        run = null;
+        const outcome = await finishCleaned(completion);
+        if (outcome === 'settled') log({ event: result.status, runId: claim.id, epoch: claim.epoch, role: claim.role, taskKind: claim.taskKind, refKind: artifact.refKind, refId: artifact.refId, ...(artifact.commitId ? { commitId: artifact.commitId } : {}) });
       } catch (error) {
         let cleanupKnown = error.cleanupKnown !== false;
+        // ACP transport/process teardown and physical sandbox removal are
+        // independent obligations. An unconfirmed client exit must never skip
+        // stopping agent background processes in the owned container.
         try {
-          await session?.stop();
+          await stopSession();
           session = null;
+        } catch { cleanupKnown = false; }
+        try {
           if (run) await runtime.abortRun(run, lease.state);
           else if (!record.cleanupKnown) await runtime.cleanupAttempt(record.runtime.prefix);
         } catch { cleanupKnown = false; }
@@ -166,16 +268,18 @@ export async function startWorker(options = {}) {
           await journal.update(record, { cleanupKnown, phase: cleanupKnown ? 'completion_pending' : 'result_staged' });
           log({ event: 'completion_outcome_unknown', runId: claim.id, epoch: claim.epoch });
         } else {
-          const lastErrorCode = stopping ? 'worker_shutdown' : error.code === 'run_budget_exhausted' ? error.code : error.code === 'camp_api_transport' || (error.status && transient(error)) ? 'worker_interrupted' : 'dsh_execution_failed';
+          const executionPolicyFailure = ['camp_capacity_low', 'camp_capacity_unavailable', 'camp_resource_policy', 'camp_resource_enforcement_failed'].includes(error.code);
+          const inspectionRequired = error.requiresInspection === true || error.code === 'camp_integration_inspection_required' || (claim.executor === 'integration' && record.phase === 'integrating');
+          const lastErrorCode = inspectionRequired && claim.executor === 'integration' ? 'camp_integration_inspection_required' : stopping ? 'worker_shutdown' : error.code === 'run_budget_exhausted' || executionPolicyFailure ? error.code : error.code === 'camp_api_transport' || (error.status && transient(error)) ? 'worker_interrupted' : claim.executor === 'verification' ? 'verification_execution_failed' : claim.executor === 'integration' ? 'camp_integration_failed' : 'dsh_execution_failed';
           const lastError = String(error.message ?? error).slice(0, 15000);
           const failureCompletion = { ...context, status: 'failed', summary: `Execution stopped: ${lastError}`.slice(0, 15000), error: lastErrorCode, ...(sessionId ? { sessionId } : {}) };
-          await journal.update(record, { cleanupKnown, phase: 'interrupted', lastErrorCode, lastError, failureCompletion, ...(error.cleanupKnown === false ? { requiresInspection: true } : {}) });
+          await journal.update(record, { cleanupKnown, phase: 'interrupted', lastErrorCode, lastError, failureCompletion, ...(inspectionRequired || error.cleanupKnown === false ? { requiresInspection: true } : {}) });
           log({ event: lease.state === 'lost' ? 'lease_lost' : lease.state === 'cancelled' ? 'cancelled' : 'run_interrupted', runId: claim.id, epoch: claim.epoch, cleanupKnown, reason: error.message ?? String(error) });
-          if (cleanupKnown && !record.requiresInspection) {
+          if (cleanupKnown && (!record.requiresInspection || (claim.executor === 'integration' && inspectionRequired))) {
             try {
               const state = checkedState(await request(`/runs/${claim.id}/state`), record);
               if (state.leaseValid && !state.replaced && state.run.workerId === record.workerId && state.run.epoch === record.epoch) {
-                const payload = state.run.cancelRequested ? { ...context, status: 'cancelled', summary: 'Execution stopped and its sandbox was removed.' } : failureCompletion;
+                const payload = state.run.cancelRequested ? { ...context, status: 'cancelled', summary: 'Execution stopped and its sandbox was removed.', ...(claim.executor === 'integration' && inspectionRequired ? { error: 'camp_integration_inspection_required' } : {}) } : failureCompletion;
                 await journal.prepareCompletion(record, payload);
                 log({ event: 'completion_prepared', runId: claim.id, epoch: claim.epoch });
                 await dispatchOutbox({ journal, record, request, state, log });
@@ -202,8 +306,24 @@ export async function startWorker(options = {}) {
         // otherwise reconciliation could fail a claim whose response alone was lost.
         if (!pendingClaim) await recoverWorker({ journal, runtime, request, log });
         if (stopping) break;
+        let negotiated;
+        try {
+          try { limits = runLimits(env.DEEPSEEK_API_KEY ? env : { CAMP_RUN_TIMEOUT_MS: env.CAMP_RUN_TIMEOUT_MS }); if (!options.runtime) await runtime.ready(); }
+          catch (error) { throw protocolFailure(`New execution configuration is invalid: ${error.message}`, 'worker_execution_configuration_required'); }
+          runtime.resourcePolicy ??= resourcePolicy(env);
+          await admitExecution();
+          await checkCapacity();
+          negotiated = await negotiateWorker({ request, pluginPath, env });
+        }
+        catch (error) {
+          // A pending intent might already own a run. Read-only state and exact
+          // old outboxes remain usable even when new execution is unsupported.
+          if (pendingClaim) await recoverWorker({ journal, runtime, request, log });
+          throw error;
+        }
+        if (stopping) break;
         const claimId = pendingClaim ?? await journal.claimIntent();
-        const value = await request('/claim', { workerId, claimId, runToken: runTokenForClaim(workerToken, claimId) });
+        const value = await request('/claim', { workerId, claimId, runToken: runTokenForClaim(workerToken, claimId), protocol: negotiated.protocol });
         const claim = checkedClaim(value);
         if (claim) {
           const existing = (await journal.list()).find(record => record.runId === claim.id && record.epoch === claim.epoch);
@@ -214,9 +334,19 @@ export async function startWorker(options = {}) {
           }
           const record = await journal.recordClaim(claim, { claimId, deadlineAt: new Date(Date.now() + limits.runTimeoutMs).toISOString(), runtime: runtime.runIdentity(`${claim.id}-e${claim.epoch}`) });
           await journal.finishClaim();
-          await executeRun(claim, record);
+          if (stopping) { await recoverWorker({ journal, runtime, request, log }); break; }
+          try { assertClaimCompatibility(value, claim, negotiated.protocol); }
+          catch (error) {
+            await recoverWorker({ journal, runtime, request, log });
+            throw protocolFailure(`Claim retained for safe recovery: ${error.message}`, error.code ?? 'protocol_required');
+          }
+          await executeRun(claim, record, negotiated.harnesses);
         } else {
           await journal.finishClaim();
+          const unmatched = unmatchedTaskKind(value, negotiated.protocol);
+          if (value.compatibility?.status === 'incompatible' && !unmatched) throw protocolFailure(`Camp cannot assign compatible work (${value.compatibility.code ?? 'capability_missing'})`, value.compatibility.code ?? 'capability_missing');
+          if (unmatched) log({ event: 'worker_waiting_for_task_kind', workerId, requiredTaskKind: value.requirements.taskKind, offeredTaskKinds: negotiated.protocol.taskKinds });
+          if (!unmatched && !value.closed && !['compatible', 'legacy'].includes(value.compatibility?.status) && !(value.compatibility === null && value.requirements === null)) throw protocolFailure('Camp claim omitted its compatibility result', 'protocol_required');
           if (env.CAMP_WORKER_ONCE === '1' && !value.closed) break;
           await delay(1500);
         }

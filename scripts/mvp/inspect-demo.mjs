@@ -35,14 +35,15 @@ console.log(JSON.stringify({
   events: state.events.slice(-8).map(event => ({ type: event.type, content: event.content.slice(0, 1200) })),
 }, null, 2));
 if (process.argv.includes('--assert-completed')) {
-  const taskIds = receipt.taskIds.length ? receipt.taskIds : state.tasks.map(task => task.id);
+  const initialTaskIds = receipt.taskIds.length ? receipt.taskIds : state.tasks.map(task => task.id);
+  const goalIds = new Set(state.tasks.filter(task => initialTaskIds.includes(task.id)).map(task => task.goalId).filter(Boolean));
+  const taskIds = state.tasks.filter(task => goalIds.size ? goalIds.has(task.goalId) : initialTaskIds.includes(task.id)).map(task => task.id);
   const goalRuns = state.runs.filter(run => taskIds.includes(run.taskId));
   const roles = ['planner', 'builder', 'reviewer'];
   for (const role of roles) {
-    if (!goalRuns.some(run => run.role === role && run.status === 'completed' && run.artifacts.some(artifact => artifact.type === 'layerfs' && artifact.commitId))) throw new Error(`${role} has no completed candidate`);
+    if (!goalRuns.some(run => run.role === role && run.status === 'completed' && run.artifacts.some(artifact => artifact.type === 'layerfs' && (artifact.refId || artifact.commitId || artifact.layerId)))) throw new Error(`${role} has no completed candidate`);
   }
   if (!goalRuns.some(run => run.role === 'reviewer' && run.status === 'completed' && run.outcome === 'approved')) throw new Error('The reviewer has not approved the candidate');
   if (state.tasks.filter(task => taskIds.includes(task.id)).some(task => task.executionStatus !== 'completed')) throw new Error('There is unfinished work');
-  const goalIds = new Set(state.tasks.filter(task => taskIds.includes(task.id)).map(task => task.goalId).filter(Boolean));
   for (const goalId of goalIds) if (!state.goals?.some(goal => goal.id === goalId && goal.status === 'completed')) throw new Error('The durable goal has not completed');
 }

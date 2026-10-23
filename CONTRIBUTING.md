@@ -18,6 +18,17 @@ Keep `origin` pointed at `rcyw/camp` and `upstream` pointed at
 `botiverse/raft-source`. Review and integrate upstream updates separately from
 Camp customizations.
 
+## Camp execution changes
+
+Use the [serial workflow contract](docs/mvp/serial-room-workflow.md) and
+[architecture boundaries](docs/mvp/architecture-review.md) when changing Camp
+execution. For same-baseline plans, also follow the
+[trusted integration contract](docs/mvp/trusted-integration.md). Keep task
+ownership and lifecycle in the control side and trusted Worker, preserve
+immutable candidate identities, and verify recovery and
+protocol compatibility at the affected boundaries. The existing CLI-specific
+rules remain in [packages/cli/AGENTS.md](packages/cli/AGENTS.md).
+
 Upstream Raft is a release mirror with its own contribution policy. Camp
 development takes place in this fork.
 

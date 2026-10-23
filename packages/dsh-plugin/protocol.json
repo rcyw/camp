@@ -1,0 +1,30 @@
+{
+  "protocolVersions": [
+    1,
+    2,
+    3
+  ],
+  "workerVersion": "0.5.0",
+  "taskKinds": [
+    "plan",
+    "build",
+    "review",
+    "final_review",
+    "summary",
+    "clarification"
+  ],
+  "refKinds": [
+    "layer",
+    "commit"
+  ],
+  "capabilities": [
+    "dsh.acp.v1",
+    "layerfs.candidate.v1",
+    "structured-plan.v1",
+    "questions.v1",
+    "candidate-review.v1",
+    "finalize.v1",
+    "checkpoint-yield.v1",
+    "candidate-diff.v1"
+  ]
+}

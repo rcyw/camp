@@ -1,3 +1,4 @@
+import { CampTaskOwnershipError } from "../services/camp/taskAuthority";
 import type { Response } from "express";
 import { ChannelConversionInProgressError } from "../services/channelConversionFenceService";
 import { DmTargetResolutionError } from "../services/dmTargetResolutionError";
@@ -12,6 +13,10 @@ export function respondToTaskWriteError(error: unknown, res: Response): boolean 
   // A task target like dm:@Twin that names both a human and an agent.
   if (error instanceof DmTargetResolutionError) {
     res.status(error.status).json(error.toResponseBody());
+    return true;
+  }
+  if (error instanceof CampTaskOwnershipError) {
+    res.status(error.status).json({ error: error.message, code: error.code });
     return true;
   }
   if (error instanceof TaskMutationConflictError) {

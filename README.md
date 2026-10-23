@@ -3,15 +3,29 @@
 **Bring your agents together.**
 
 Camp is a self-hosted workspace where people and AI roles collaborate in a
-shared channel. Its new MVP uses DeepSeek Harness (DSH) as the execution entry,
-independent Docker sandboxes, and LayerFS candidate versions. Planner, builder
-and reviewer roles claim dependent tasks and report their progress in the room.
+shared channel. Its execution path uses DeepSeek Harness (DSH) as the execution entry,
+independent Docker sandboxes, and LayerFS candidate versions. A coordinator
+submits an ordered plan; builder and reviewer roles execute each item, resolve
+blocking questions, and report their progress in the room. Final acceptance and
+the coordinator's delivery summary establish the next requirement's baseline.
 
 Start with the [Camp MVP guide](docs/mvp/README.md) and
 [architecture and implementation plan](docs/mvp/raft-dsh-layerfs.md).
+The [serial delivery workflow](docs/mvp/serial-room-workflow.md) describes plans,
+automatic review and rework, questions, final acceptance and result continuation.
+The [worker protocol](docs/mvp/worker-protocol.md) defines shared contracts,
+capability checks before allocation and compatibility with existing execution results.
+The [delivery evidence design](docs/mvp/delivery-evidence.md) adds cumulative
+candidate diffs, frozen operator checks, independent validation sandboxes and
+bounded automatic repair before a result can be accepted.
+The [trusted integration guide](docs/mvp/trusted-integration.md) adds two reviewed
+candidates from a shared baseline, conservative native merging, exact evidence
+and recovery before checks and whole-goal acceptance.
+The [single-host worker guide](docs/mvp/single-host-worker.md) covers pinned toolchain
+bundles, connection diagnostics, resource bounds and offline cleanup/recovery.
 The [durable execution design](docs/mvp/durable-execution.md) covers goal budgets,
-worker recovery and result outboxes; [the next workflow stage](docs/mvp/durable-workflows-next.md)
-defines dynamic planning and trusted candidate integration.
+worker recovery and result outboxes; [parallel workflow design](docs/mvp/durable-workflows-next.md)
+defines future bounded concurrency and dependency graphs.
 
 Camp is an independently maintained fork of
 [Raft](https://github.com/botiverse/raft-source). Development and customizations
@@ -23,8 +37,11 @@ channels, threads, direct messages and tasks alongside people.
 
 ## Current focus
 
-- Submit a goal with `/camp` and observe planning, implementation and review.
-- Preserve each execution's filesystem candidate and verification evidence.
+- Submit a goal with `/camp` and observe ordered tasks, review and automatic rework.
+- Resolve questions in the room and continue from the accepted result.
+- Inspect candidate file changes, two-parent integration and independent verification receipts.
+- Connect a worker with a downloadable configuration and checks before allocation.
+- Recover owned sandboxes and exact result outboxes after a worker crash.
 - Keep task ownership, model execution and sandbox lifecycle explicit.
 
 The inherited commands and package names (`raft`, `raft-computer`, `raftdev`
@@ -36,6 +53,9 @@ This repository contains the following components:
 | --- | --- |
 | `packages/server` | API server, realtime (Socket.IO), persistence and integrations |
 | `packages/web` | Web client |
+| `packages/camp-protocol` | Dependency-free wire contracts, validators and role tool schemas |
+| `packages/camp-runtime` | Trusted DSH worker, local sandboxes and LayerFS adapter |
+| `packages/dsh-plugin` | Scoped role tools for DSH |
 | `packages/cli` | `raft` command line, used by humans and by agents |
 | `packages/daemon` | Machine daemon that runs agents and brokers their credentials |
 | `packages/computer` | Computer runtime and installer for hosting agents on your own machine |

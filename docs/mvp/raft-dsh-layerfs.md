@@ -1,5 +1,9 @@
 # Camp MVP: Room collaboration with DSH and LayerFS
 
+This document retains the initial fixed-pipeline MVP design and validation. The
+current ordered planning, questions, item review/rework, final acceptance and
+result continuation contract is documented in [serial room delivery](./serial-room-workflow.md).
+
 ## Goal and scope
 
 One channel is the shared work room. A human describes an outcome; planner, builder and reviewer identities discuss and execute the work, report progress in the channel, and hand off through persisted tasks. DSH is the only new execution engine. LayerFS provides a branch and immutable candidate reference for each execution attempt.
@@ -87,13 +91,13 @@ The Camp DSH plugin provides context/progress/artifact operations. It never rece
 
 ## LayerFS integration
 
-The adapter exposes project preparation, run preparation, candidate commit and run release. The run descriptor includes project, branch, sandbox/container, workspace path and image identity. A clean candidate is identified by an immutable Commit; changes after validation require a new candidate and validation result.
+The adapter exposes project preparation, run preparation, candidate commit and run release. The run descriptor includes project, branch, sandbox/container, workspace path and image identity. A candidate is identified by a tagged immutable Layer or Commit plus its file root and fixed image. Initial imports and unchanged results can remain Layers; changes after validation require a new candidate and validation result.
 
 LayerFS Store access is in the trusted SDK process on the same Linux host and local filesystem as its daemons. No shared mutable SQLite Store over NFS or across independent kernels is promised. The filesystem daemon's mount privileges and the DSH command identity must remain separate. Docker socket and global worker credentials are not mounted into the DSH environment.
 
 The existing LayerFS JS placement packs multiple Workspaces per sandbox. The Camp adapter must explicitly arrange isolated execution placement rather than treating separate paths as separate sandboxes. Filesystem read/write and command execution refer to the same mounted view.
 
-The current supported Store profile is Disposable/WAL/synchronous=OFF. Camp task/run records live in PostgreSQL and DSH session archives are retained outside the Store. File artifacts currently remain references rather than independent exported copies; trusted artifact export is later work. A filesystem commit is not a process, memory, socket or external-service checkpoint. LayerFS `publish` is not automatically a merge, approval or test gate; raw publication is reserved for a future trusted integration operation with explicit current-head checks.
+The current supported Store profile is Disposable/WAL/synchronous=OFF. Camp task/run records live in PostgreSQL and DSH session archives are retained outside the Store. Authorized result manifests and explicit local export to a new directory or tar archive are implemented; automatic independent artifact backup and retention remain future work. A filesystem commit is not a process, memory, socket or external-service checkpoint. LayerFS `publish` is not automatically a merge, approval or test gate; raw publication is reserved for a future trusted integration operation with explicit current-head checks. Current candidate Diff and independent verification behavior is documented in [delivery evidence](./delivery-evidence.md).
 
 ## Failure and cancellation
 

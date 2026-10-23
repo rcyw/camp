@@ -1,0 +1,47 @@
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, writeFile, chmod, symlink, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { CampRuntime } from '../src/index.mjs';
+import { createChangeSet } from '../src/change-set.mjs';
+import { parseChangeSet } from '../../camp-protocol/src/index.js';
+
+const root = fileURLToPath(new URL('..', import.meta.url));
+const image = JSON.parse(await readFile(`${root}/.local/baked-image.json`, 'utf8'));
+const runtime = await new CampRuntime({ imageId: image.imageId }).ready();
+const stamp = Date.now(), folder = await mkdtemp(join(root, '.local/diff-proof-'));
+const source = join(folder, 'source'); await mkdir(source);
+await writeFile(join(source, 'text'), 'before\n'); await writeFile(join(source, 'deleted'), 'remove\n');
+await writeFile(join(source, 'binary'), Buffer.from([0, 1]));
+await writeFile(join(source, 'mode'), 'same'); await chmod(join(source, 'mode'), 0o751);
+await symlink('/etc/passwd', join(source, 'opaque'));
+const project = await runtime.prepareProject({ projectId: `diff-proof-${stamp}`, sourcePath: source });
+let run;
+const owners = [];
+try {
+  run = await runtime.prepareRun({ project, runId: `diff-proof-build-${stamp}`, roleId: 'builder' });
+  const base = await runtime.pinInputCandidate(run, null);
+  assert.equal(base.refKind, 'layer');
+  const command = `node -e ${JSON.stringify("const fs=require('node:fs');fs.writeFileSync('text','after\\n');fs.unlinkSync('deleted');fs.writeFileSync('binary',Buffer.from([0,2]));fs.chmodSync('mode',0o644);fs.unlinkSync('opaque');fs.symlinkSync('../../outside','opaque');fs.writeFileSync('added','new\\n');")}`;
+  assert.equal((await runtime.exec(run, command)).exitCode, 0);
+  await runtime.quiesceAgent(run);
+  const target = await runtime.commitCandidate(run);
+  assert.equal(target.refKind, 'commit');
+  await runtime.releaseRun(run); run = null;
+  const ownerRun = runtime.runIdentity(`diff-proof-report-${stamp}`); owners.push(ownerRun);
+  const report = parseChangeSet(await createChangeSet({ runtime, ownerRun, base, target }));
+  const entries = new Map(report.entries.map(entry => [entry.path, entry]));
+  assert.match(entries.get('text').patch, /-before\n\+after/);
+  assert.equal(entries.get('deleted').change, 'deleted'); assert.equal(entries.get('added').change, 'added');
+  assert.equal(entries.get('binary').binary, true); assert.equal(entries.get('binary').patch, null);
+  assert.equal(entries.get('mode').before.mode, 0o751); assert.equal(entries.get('mode').after.mode, 0o644);
+  assert.equal(entries.get('opaque').before.target, '/etc/passwd'); assert.equal(entries.get('opaque').after.target, '../../outside');
+  assert.equal(JSON.stringify(report).includes('root:x:'), false, 'opaque links are never followed on the host');
+  const sameOwner = runtime.runIdentity(`diff-proof-noop-${stamp}`); owners.push(sameOwner);
+  const same = parseChangeSet(await createChangeSet({ runtime, ownerRun: sameOwner, base, target: base }));
+  assert.deepEqual(same.entries, []); assert.equal(same.truncated, false);
+  for (const owner of owners) assert.equal((await runtime.dockerCall(['ps', '-a', '-q', '--filter', `name=^/${owner.prefix}`])).stdout.trim(), '');
+  const receipt = { at: new Date().toISOString(), base, target, changeSet: report, noopLayerCompared: true, opaqueLinksNotFollowed: true, allAuxiliaryContainersRemoved: true, modelCalled: false };
+  await writeFile(`${root}/.local/change-set.json`, JSON.stringify(receipt, null, 2));
+  console.log(JSON.stringify({ at: receipt.at, stats: report.stats, layerToCommit: true, noOpLayer: true, modelCalled: false }));
+} finally { if (run) await runtime.abortRun(run, 'diff_proof_cleanup'); for (const owner of owners) await runtime.cleanupAttempt(owner.prefix); }

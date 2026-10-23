@@ -59,6 +59,8 @@ export const PINNED_BUCKET_COUNTS: Readonly<Record<string, number>> = {
 };
 
 export const ROUTE_AUTHORITY_CLASSIFICATION: readonly RouteClassification[] = [
+  { route: "PUT /api/camp/rooms/:roomId/verification-policy", bucket: "campScoped", reason: "Human server administrator only; operator policy affects future goal snapshots, never model-provided commands" },
+  { route: "PUT /api/camp/rooms/:roomId/project", bucket: "campScoped", reason: "Human server administrator under Room and membership locks; digest CAS may configure only a project with no execution history" },
   { route: "POST /api/camp/rooms", bucket: "cat1", reason: "human owner/admin locked at commit; canonical external role identities and channel membership created atomically, no native runtime dispatch" },
   { route: "POST /api/camp/rooms/:roomId/tasks", bucket: "notAgentMachine", reason: "channel post access; canonical task board pipeline submission, no Agent relationship or Computer write" },
   { route: "POST /api/camp/rooms/:roomId/worker-token", bucket: "campScoped", reason: "human room Server owner/admin fenced under membership and room locks; grants room-scoped worker capability distinct from Agent credentials" },
@@ -66,11 +68,18 @@ export const ROUTE_AUTHORITY_CLASSIFICATION: readonly RouteClassification[] = [
   { route: "POST /api/camp/rooms/:roomId/runs/:runId/cancel", bucket: "campScoped", reason: "human room Server owner/admin fenced under membership and room locks; worker acknowledges actual cleanup" },
   { route: "POST /api/camp/rooms/:roomId/goals/:goalId/retry", bucket: "campScoped", reason: "human room Server owner/admin fenced under membership and room locks; expectedAttempt CAS starts one bounded manual attempt" },
   { route: "POST /api/camp/rooms/:roomId/goals/:goalId/cancel", bucket: "campScoped", reason: "human room Server owner/admin fenced under membership and room locks; queued descendants stop and active workers acknowledge cleanup" },
+  { route: "POST /api/camp/rooms/:roomId/questions/:questionId/answer", bucket: "notAgentMachine", reason: "channel post access and actor membership fenced at commit; answers a durable waiting question without granting Agent authority" },
   { route: "POST /api/camp/worker/claim", bucket: "nonHuman", reason: "Camp room worker bearer token; claim serializes room and task lease epoch, no human session principal" },
+  { route: "POST /api/camp/worker/preflight", bucket: "nonHuman", reason: "Camp room worker bearer token only; bounded self-reported setup checks and server observation time, no run allocation or execution budget" },
   { route: "POST /api/camp/worker/runs/:runId/heartbeat", bucket: "nonHuman", reason: "Camp room worker bearer token plus run owner and epoch fence; no human session principal" },
   { route: "POST /api/camp/worker/runs/:runId/events", bucket: "nonHuman", reason: "Camp room worker or current run bearer token; live epoch fence, model artifact reports restricted to file/review" },
   { route: "POST /api/camp/worker/runs/:runId/complete", bucket: "nonHuman", reason: "Camp room worker bearer token only; current run owner and epoch fence with idempotent terminal replay" },
   { route: "POST /api/camp/worker/runs/:runId/cleanup", bucket: "nonHuman", reason: "Camp room worker bearer token only; original worker/epoch may attest old resource cleanup without changing run result or lease" },
+  { route: "POST /api/camp/worker/runs/:runId/plan", bucket: "nonHuman", reason: "Camp live planner run or room worker credential; immutable attempt-scoped ordered plan, current run/epoch/head fence" },
+  { route: "POST /api/camp/worker/runs/:runId/finalize", bucket: "nonHuman", reason: "Camp live final summary run or room worker credential; summary binds the server-selected immutable final candidate" },
+  { route: "POST /api/camp/worker/runs/:runId/questions", bucket: "nonHuman", reason: "Camp live run/epoch/attempt fence; one durable unconsumed question per task, no broad dispatch" },
+  { route: "POST /api/camp/worker/runs/:runId/questions/:questionId/answer", bucket: "nonHuman", reason: "Camp assigned clarification run/epoch fence; answers once and resumption waits for its worker completion" },
+  { route: "POST /api/camp/worker/runs/:runId/questions/:questionId/escalate", bucket: "nonHuman", reason: "Camp assigned clarification run/epoch fence; explicit human escalation never waits inside the worker" },
   { route: "POST /api/camp/worker/rooms/:roomId/messages", bucket: "nonHuman", reason: "Camp room worker or current run bearer token; live run fence, room-scoped message persistence without broad agent dispatch" },
   { route: "PUT /api/raftbench", bucket: "cat1", reason: "human owner/admin locked at commit; dedicated member-agent creation uses createAgent actor fence; no Computer binding or model tools" },
   { route: "POST /api/raftbench/agents", bucket: "cat1", reason: "human owner/admin locked at commit; dedicated agent creation uses createAgent actor fence; provider provisioning runs asynchronously" },

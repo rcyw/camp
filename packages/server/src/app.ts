@@ -45,7 +45,8 @@ import { billingRouter, stripeWebhookHandler } from "./routes/billing";
 import { resendNewsletterWebhookHandler } from "./routes/newsletterWebhooks";
 import { raftbenchRouter } from "./routes/raftbench";
 import { taskRouter } from "./routes/tasks";
-import { campRouter, campWorkerRouter } from "./routes/camp";
+import { authenticateCampRequest, campRouter, campWorkerRouter } from "./routes/camp";
+import { CAMP_COMPLETION_PATH, CAMP_COMPLETION_BODY_MAX_BYTES, CAMP_TOOL_PATHS, CAMP_TOOL_BODY_MAX_BYTES, CAMP_ROOM_BODY_MAX_BYTES, campBodyErrorHandler } from "./routes/campRequestLimits";
 import { reminderRouter } from "./routes/reminders";
 import { attachmentRouter, attachmentPublicRouter } from "./routes/attachments";
 import { externalAvatarPublicRouter } from "./routes/externalAvatars";
@@ -280,6 +281,14 @@ export function createApp(options: CreateAppOptions = {}): Express {
     express.json({ limit: AGENT_MIGRATION_CONTROL_REQUEST_MAX_BYTES }),
     agentMigrationControlBodyErrorHandler,
   );
+  // Camp's bounded reports and Unicode plans exceed the default 100 KiB.
+  // Authenticate exact routes before accepting their larger bodies; unrelated
+  // API routes continue to use the default parser below.
+  app.post(CAMP_COMPLETION_PATH, authenticateCampRequest, express.json({ limit: CAMP_COMPLETION_BODY_MAX_BYTES }), campBodyErrorHandler(CAMP_COMPLETION_BODY_MAX_BYTES));
+  app.post(CAMP_TOOL_PATHS, authenticateCampRequest, express.json({ limit: CAMP_TOOL_BODY_MAX_BYTES }), campBodyErrorHandler(CAMP_TOOL_BODY_MAX_BYTES));
+  app.post("/api/camp/rooms", requireAuth, requireVerified, requireServer, express.json({ limit: CAMP_ROOM_BODY_MAX_BYTES }), campBodyErrorHandler(CAMP_ROOM_BODY_MAX_BYTES));
+  app.post("/api/camp/rooms/:roomId/tasks", requireAuth, requireVerified, requireServer, express.json({ limit: CAMP_ROOM_BODY_MAX_BYTES }), campBodyErrorHandler(CAMP_ROOM_BODY_MAX_BYTES));
+  app.put("/api/camp/rooms/:roomId/verification-policy", requireAuth, requireVerified, requireServer, express.json({ limit: CAMP_ROOM_BODY_MAX_BYTES }), campBodyErrorHandler(CAMP_ROOM_BODY_MAX_BYTES));
   app.use(express.json());
   // Default freshness policy for the whole authenticated API surface (human
   // /api and agent /internal alike): per-user JSON with no explicit policy is

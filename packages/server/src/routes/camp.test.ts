@@ -4,7 +4,7 @@ import { eq, sql } from "drizzle-orm";
 import { vi } from "vitest";
 import { apiTest } from "../test/integration/apiTest";
 import { agents, campRuns, messages, serverAgentMembers, tasks } from "../db/schema";
-import { CAMP_ROLES, type CampClaimedRun } from "../services/camp/types";
+import { CAMP_ROLES, type CampAgentClaimedRun as CampClaimedRun } from "../services/camp/types";
 import { getServerBillingUsage } from "../services/planService";
 
 async function workerRequest(baseUrl: string, token: string, path: string, body?: unknown) {
@@ -25,7 +25,7 @@ apiTest("Camp three-role pipeline keeps progress quiet, scopes run credentials a
   const create = await user.request("/api/camp/rooms", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channelId: channel.id, name: "Build room", project: { name: "demo", repoPath: "/private/source", storePath: "/private/store" }, roles: CAMP_ROLES.map((role, index) => ({ role, agentId: roleAgents[index].id })) }) });
   assert.equal(create.status, 201, await create.clone().text());
   const room = await create.json() as { id: string };
-  const pipeline = await user.request(`/api/camp/rooms/${room.id}/tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Build a counter" }) });
+  const pipeline = await user.request(`/api/camp/rooms/${room.id}/tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Build a counter", workflow: "legacy" }) });
   assert.equal(pipeline.status, 201, await pipeline.clone().text());
   assert.deepEqual((await pipeline.json() as { tasks: Array<{ role: string }> }).tasks.map(task => task.role), [...CAMP_ROLES]);
   const mint = await user.request(`/api/camp/rooms/${room.id}/worker-token`, { method: "POST" });

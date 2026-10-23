@@ -1,6 +1,6 @@
-# Deferred: bounded plans and trusted candidate integration
+# Next: bounded concurrency and dependency plans
 
-This document is a design proposal for the stage after durable goals and recovery. It is not the current API or an enabled execution mode. The current release retains the planner → builder → reviewer pipeline. Goals, retry/cancellation and recovery must pass their own regression and real execution checks before dynamic plans are enabled.
+This document proposes the parallel stage after [serial room delivery](./serial-room-workflow.md) and [trusted two-candidate integration](./trusted-integration.md). The current API accepts bounded ordered plans and executes one builder item at a time, followed by review and final acceptance. The explicit same-baseline pair now has trusted integration while its two builders still execute sequentially. Arbitrary dependency graphs and concurrent implementation remain disabled. The parallel request shape below is a proposal, not an accepted current request.
 
 ## Product boundary
 
@@ -10,7 +10,7 @@ The useful demonstration is two independent implementation tasks from the same i
 
 ## Proposed planning contract
 
-The eventual `camp_submit_plan` tool would send a current-run capability to a dedicated endpoint, such as `POST /api/camp/worker/runs/:runId/plan`. This endpoint does not exist in the current release.
+The current `camp_submit_plan` tool uses `POST /api/camp/worker/runs/:runId/plan` for ordered items with acceptance and verification fields. A future graph-capable contract could extend it as illustrated below. Current endpoints reject unknown dependency/role/model fields rather than silently treating such a graph as a serial plan.
 
 ```json
 {
@@ -44,16 +44,17 @@ Each implementation attempt has an immutable input baseline and an immutable out
 
 For siblings built from the same baseline, trusted integration must combine changes relative to that baseline. It must not replace the whole workspace with one sibling's complete filesystem snapshot. Using the final array element, newest completion timestamp or last candidate commit silently drops other work.
 
-The first supported integration mechanism should be explicit and narrow:
+The implemented release integrates exactly two candidates from one frozen baseline; arbitrary graph scheduling remains disabled. In the pinned LayerFS revision (`5fb68ddc1acc3163e3ac3486133bde014c5fbed3`), `branch.merge(a, b, name, message, units)` provides a three-way merge without mutating the input branches. Camp now invokes this API with a conservative policy and validates the complete resulting tree; the implementation and actual acceptance are described in the trusted integration guide. LayerFS's default `/.lww` selection and optional units can select one side, so the integration policy must explicitly control them rather than assume every overlap becomes a conflict.
 
-1. Materialize each candidate and the shared baseline in trusted workspaces outside the agent's write authority.
-2. Produce deterministic, inspectable change sets relative to that baseline, including deletions, executable modes and bounded binary-file handling.
-3. Apply changes in a recorded order into a fresh integration workspace. Reject ambiguous overlaps, incompatible baselines and unsupported filesystem objects. Never resolve a source conflict by asking a reviewer to approve an unspecified result.
-4. Persist a new immutable integrated candidate with its exact parent candidate IDs, integration algorithm/version and result evidence.
-5. Run the required checks against that integrated candidate, then assign a reviewer that exact immutable identity.
+The supported integration mechanism is explicit and narrow:
 
-Whether LayerFS can provide these operations directly must be verified against its actual merge/diff APIs. A filesystem snapshot/commit is already useful for lineage; it is not proof that a three-way merge exists. Until the trusted algorithm and round-trip tests exist, the scheduler must retain serial implementation or reject multi-parent work with an actionable explanation.
+1. Freeze the shared baseline and both exact parent candidate identities, roots, image and policy in a server-owned operation. Require both parents to descend from the intended baseline; reject unrelated or superseded inputs.
+2. Use fresh, trusted branches outside agent write authority. Invoke a versioned LayerFS merge adapter with an explicit conflict policy. Never use the bounded display Diff as an applicable patch; it can be truncated and is not a complete filesystem representation.
+3. Reject ambiguous overlaps, unsupported filesystem objects and unapproved conflict-selection policy. Preserve both inputs. A merge conflict yields no accepted result; `NameTaken` or an interrupted native call requires inspection of the recorded intent before retrying.
+4. Persist the exact immutable integrated candidate, both parents, algorithm/policy version and evidence through an outbox. An operation replay must not create another accepted candidate or rewrite history.
+5. Run the frozen checks against the integrated candidate, then assign review to that exact identity. Separate approvals of the parents cannot approve their combination.
 
+Real LayerFS round-trip, conflicting-edit, deletion, binary/mode, no-op Layer, prior merge-Commit baseline, replay and interruption tests now establish this narrow contract. Parallel admission, aggregate resources, concurrent cancellation and multiple active leases still need separate acceptance.
 Integration is a first-class durable operation with its own idempotency key and recovery state. An unknown integration outcome must be inspected before retrying. A conflicting integration becomes `needs_attention`; downstream review must not run against an arbitrary fallback candidate.
 
 ## Review contract

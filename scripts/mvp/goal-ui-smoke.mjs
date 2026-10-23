@@ -23,7 +23,7 @@ const created = await request('/channels/', { name, description: 'Protocol-only 
 const channel = created.channel ?? created;
 const room = await request('/camp/rooms', { channelId: channel.id, name, project: { name, repoPath: directory } });
 const { token } = await request(`/camp/rooms/${room.id}/worker-token`, {});
-let state = await request(`/camp/rooms/${room.id}/tasks`, { title: 'Protocol fixture: one-run budget, explicit retry and cancellation', description: 'Browser/API verification fixture only; no DSH or sandbox is executed.', budget: { maxRuns: 1, maxReviewRounds: 1, maxDurationSeconds: 300 } });
+let state = await request(`/camp/rooms/${room.id}/tasks`, { workflow: 'legacy', title: 'Protocol fixture: one-run budget, explicit retry and cancellation', description: 'Browser/API verification fixture only; no DSH or sandbox is executed.', budget: { maxRuns: 1, maxReviewRounds: 1, maxDurationSeconds: 300 } });
 const goal = state.goals.find(goal => goal.title.startsWith('Protocol fixture:'));
 assert.ok(goal);
 await writeFile(resolve(directory, 'context.json'), JSON.stringify({ roomId: room.id, goalId: goal.id, name }, null, 2) + '\n');

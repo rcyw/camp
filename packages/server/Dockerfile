@@ -46,6 +46,7 @@ COPY packages/runtime-form/package.json packages/runtime-form/
 COPY packages/shared/package.json packages/shared/
 COPY packages/trace-client/package.json packages/trace-client/
 COPY packages/server/package.json packages/server/
+COPY packages/camp-protocol/package.json packages/camp-protocol/
 
 # Install all dependencies (@oxc-node/core loads TypeScript source at runtime)
 ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
@@ -57,6 +58,7 @@ COPY packages/runtime-form/ packages/runtime-form/
 COPY packages/shared/ packages/shared/
 COPY packages/trace-client/ packages/trace-client/
 COPY packages/server/ packages/server/
+COPY packages/camp-protocol/ packages/camp-protocol/
 COPY manual/ manual/
 
 LABEL org.opencontainers.image.title="slock-server" \
@@ -67,6 +69,6 @@ LABEL org.opencontainers.image.title="slock-server" \
 
 EXPOSE 3001
 
-# Entrypoint: push DB schema then start server
+# Entrypoint starts the server; run the guarded migration command separately.
 RUN chmod +x packages/server/entrypoint.sh
 CMD ["packages/server/entrypoint.sh"]

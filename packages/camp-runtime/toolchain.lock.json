@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "layerfs": {
+    "revision": "5fb68ddc1acc3163e3ac3486133bde014c5fbed3",
+    "cargoLockSha256": "af9b5c8aec2d2bbfbfb6216cd8c7839d80b95bea1669df03c69e0a3f318a84a6",
+    "cargoConfigSha256": "f54e4d536550625b3df978a6b506c44a51fa84dac85a4e2d0293dad1727be8c8",
+    "rustToolchain": "1.99.0",
+    "profile": "debug",
+    "storeProfile": "Disposable"
+  },
+  "dsh": {
+    "version": "0.2.1-rc.2",
+    "lockSha256": "65d1781a2785776a06f979484a2308c47008f1408d84126f9e0b2e397cdb5083"
+  },
+  "nodeMajor": 24,
+  "image": {
+    "version": "24.16.0",
+    "repository": "node",
+    "tag": "24.16.0-trixie",
+    "platforms": {
+      "x64": "sha256:d0ba7acd944247d3530d89c1027126e811f64b243e794ce2c41f2d8800cbfbf8",
+      "arm64": "sha256:2d5d13389720301fb00a16d7d6d0b8bba5bcd62176a61b47c7a3a8afbcf8693f"
+    }
+  }
+}

@@ -8,9 +8,11 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { apply } from "../src/index.js";
 import { createRunClient, runContext } from "../src/client.js";
+import { createPluginDeclaration, CAMP_TOOL_SCHEMAS } from '../../camp-protocol/src/index.js';
 
 const env = {
   CAMP_API_URL: "http://camp.test:13018", CAMP_RUN_TOKEN: "short-run-token", CAMP_WORKER_TOKEN: "must-not-use",
+  CAMP_PROTOCOL_VERSION: '1',
   CAMP_WORKER_ID: "worker-1", CAMP_RUN_ID: "run-1", CAMP_RUN_EPOCH: "2", CAMP_ROOM_ID: "room-1",
 };
 
@@ -19,6 +21,8 @@ test("requires an explicit run capability and never falls back to the supervisor
   assert.throws(() => runContext({ ...env, CAMP_RUN_TOKEN: "" }), /CAMP_RUN_TOKEN/);
   assert.throws(() => runContext({ ...env, CAMP_RUN_EPOCH: "0" }), /positive integer/);
   assert.throws(() => runContext({ ...env, CAMP_API_URL: "file:///tmp/state" }), /HTTP/);
+  assert.throws(() => runContext({ ...env, CAMP_PROTOCOL_VERSION: undefined }), /CAMP_PROTOCOL_VERSION/);
+  assert.throws(() => runContext({ ...env, CAMP_PROTOCOL_VERSION: '99' }), /Unsupported Camp run protocol/);
 });
 
 test("fences requests with run identity, targets the room explicitly, and does not follow redirects or replay rejected writes", async () => {
@@ -50,15 +54,92 @@ test("registers only scoped collaboration tools and rejects private delegation w
     systemPrompt: { section(value) { sections.push(value); } },
     on(event, cb) { gates.set(event, cb); },
   });
-  assert.deepEqual([...tools.keys()], ["camp_read_context", "camp_read_room", "camp_send_message", "camp_progress", "camp_artifact", "camp_handoff", "camp_review"]);
+  assert.deepEqual([...tools.keys()], ["camp_read_context", "camp_read_room", "camp_send_message", "camp_progress", "camp_artifact", "camp_handoff", "camp_submit_plan", "camp_ask_question", "camp_answer_question", "camp_escalate_question", "camp_finalize", "camp_review"]);
   assert.equal([...tools.keys()].some((name) => /claim|complete|heartbeat/.test(name)), false);
   assert.match(sections[0].text, /never transfers the task lease/);
+  assert.match(sections[0].text, /Never wait or poll for another role/);
+  assert.match(sections[0].text, /A final prose answer alone cannot finalize/);
   const guard = gates.get("tools/pre-execute");
   let delegated = false;
   assert.equal((await guard({ name: "subagent_fork" }, async () => { delegated = true; })).kind, "deny");
   assert.equal(delegated, false);
   assert.deepEqual(await guard({ name: "bash" }, async () => ({ kind: "allow" })), { kind: "allow" });
-  for (const tool of tools.values()) assert.equal(tool.output.schema.type, "object");
+  for (const tool of tools.values()) {
+    assert.equal(tool.output.schema.type, "object");
+    assert.deepEqual(tool.parameters, CAMP_TOOL_SCHEMAS[tool.name]);
+    assert.notEqual(tool.parameters, CAMP_TOOL_SCHEMAS[tool.name]);
+  }
+});
+test('the shipped static plugin descriptor matches its shared source declaration', async () => {
+  const descriptor = JSON.parse(await readFile(new URL('../protocol.json', import.meta.url), 'utf8'));
+  assert.deepEqual(descriptor, createPluginDeclaration());
+  await promisify(execFile)(process.execPath, [fileURLToPath(new URL('../scripts/protocol-descriptor.mjs', import.meta.url)), '--check']);
+});
+
+test("a plan conflict preserves its business reason without replaying the write or pretending the lease expired", async () => {
+  let attempts = 0;
+  const client = createRunClient(runContext(env), async () => { attempts++; return Response.json({ code: "plan_conflict", error: "This attempt already has a different immutable plan" }, { status: 409 }); });
+  await assert.rejects(() => client.submitPlan({ summary: "Changed", tasks: [{ key: 'one', title: 'First', description: 'A valid change', acceptance: 'Correct behavior', verification: 'Run tests' }] }), { code: "plan_conflict", status: 409, message: /preserve the accepted record/ });
+  assert.equal(attempts, 1);
+});
+
+test("ordered plans preserve acceptance and verification while rejecting malformed or duplicate items before sending", async () => {
+  const previous = { ...process.env }; const originalFetch = globalThis.fetch;
+  const tools = new Map(); const calls = [];
+  const item = { key: "parser", title: "Parse input", description: "Implement a bounded parser", acceptance: "Empty input returns a validation error", verification: "Run node --test test/parser.test.mjs" };
+  try {
+    Object.assign(process.env, env);
+    globalThis.fetch = async (url, init) => { calls.push({ url, body: JSON.parse(init.body) }); return Response.json({ plan: { revision: 1 } }); };
+    apply({ tools: { register(tool) { tools.set(tool.name, tool); return () => {}; } }, systemPrompt: { section() {} }, on() {} });
+    const submit = tools.get("camp_submit_plan");
+    await assert.rejects(() => submit.execute({ summary: "Plan", tasks: [] }, {}), /one to five/);
+    await assert.rejects(() => submit.execute({ summary: "Plan", tasks: [item, item] }, {}), /unique/);
+    await assert.rejects(() => submit.execute({ summary: "Plan", tasks: [{ ...item, acceptance: " " }] }, {}), /acceptance/);
+    await assert.rejects(() => submit.execute({ summary: "Plan", tasks: [{ ...item, key: "../other" }] }, {}), /identifier/);
+    assert.equal(calls.length, 0);
+    await submit.execute({ summary: "One safe change", tasks: [item], workerId: "forged", candidate: "forged" }, {});
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /\/runs\/run-1\/plan$/);
+    assert.deepEqual(calls[0].body, { workerId: "worker-1", runId: "run-1", epoch: 2, planRevision: 1, summary: "One safe change", tasks: [item] });
+  } finally { process.env = previous; globalThis.fetch = originalFetch; }
+});
+
+test("blocking questions, answers and escalation use durable run-scoped endpoints without a claim or a polling loop", async () => {
+  const previous = { ...process.env }; const originalFetch = globalThis.fetch;
+  const tools = new Map(); const calls = [];
+  try {
+    Object.assign(process.env, env);
+    globalThis.fetch = async (url, init) => { calls.push({ url, body: JSON.parse(init.body), token: init.headers.authorization }); return Response.json({ question: { status: "pending" } }); };
+    apply({ tools: { register(tool) { tools.set(tool.name, tool); return () => {}; } }, systemPrompt: { section() {} }, on() {} });
+    await assert.rejects(() => tools.get("camp_ask_question").execute({ content: "Choose ordering", to_role: "planner", needs_human: "yes" }, {}), /boolean/);
+    await tools.get("camp_ask_question").execute({ content: "Which ordering follows the requirement?", to_role: "planner" }, {});
+    const questionId = calls[0].body.questionId;
+    assert.match(questionId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.equal(calls[0].body.toRole, "planner");
+    await tools.get("camp_answer_question").execute({ question_id: questionId, answer: "Ascending, as specified in the requirement" }, {});
+    await tools.get("camp_escalate_question").execute({ question_id: questionId, reason: "The requirement leaves the supported region unspecified" }, {});
+    assert.deepEqual(calls.map(call => new URL(call.url).pathname), [
+      "/api/camp/worker/runs/run-1/questions", `/api/camp/worker/runs/run-1/questions/${questionId}/answer`, `/api/camp/worker/runs/run-1/questions/${questionId}/escalate`,
+    ]);
+    assert.ok(calls.every(call => call.token === "Bearer short-run-token" && call.body.epoch === 2));
+    assert.equal(JSON.stringify(calls).includes("must-not-use"), false);
+  } finally { process.env = previous; globalThis.fetch = originalFetch; }
+});
+
+test("finalization reports evidence and limitations without accepting a model-selected candidate or replaying a rejection", async () => {
+  const previous = { ...process.env }; const originalFetch = globalThis.fetch;
+  const tools = new Map(); const calls = [];
+  try {
+    Object.assign(process.env, env);
+    globalThis.fetch = async (url, init) => { calls.push({ url, body: JSON.parse(init.body) }); return new Response("fenced", { status: 409 }); };
+    apply({ tools: { register(tool) { tools.set(tool.name, tool); return () => {}; } }, systemPrompt: { section() {} }, on() {} });
+    const finalize = tools.get("camp_finalize");
+    await assert.rejects(() => finalize.execute({ summary: "Done", remaining: [""] }, {}), /limitations/);
+    await assert.rejects(() => finalize.execute({ summary: "Parser and UI delivered", evidence: "node --test passed 8 checks", remaining: ["Deployment is not included"], candidate: { commitId: "forged" } }, {}), /no longer authorized/);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /\/runs\/run-1\/finalize$/);
+    assert.deepEqual(calls[0].body, { workerId: "worker-1", runId: "run-1", epoch: 2, summary: "Parser and UI delivered", evidence: "node --test passed 8 checks", remaining: ["Deployment is not included"] });
+  } finally { process.env = previous; globalThis.fetch = originalFetch; }
 });
 
 test("review and file tools produce typed artifacts, and a review cannot default to approval", async () => {
@@ -97,6 +178,30 @@ test("a review without a server-authorized immutable candidate never submits an 
     apply({ tools: { register(tool) { tools.set(tool.name, tool); return () => {}; } }, systemPrompt: { section() {} }, on() {} });
     await assert.rejects(() => tools.get("camp_review").execute({ outcome: "approved", summary: "Reviewed", evidence: "Tests passed" }, {}), /No immutable review candidate/);
     assert.equal(writes, 0);
+  } finally { process.env = previous; globalThis.fetch = originalFetch; }
+});
+
+test("review binds an immutable initial Layer or Commit reference without inventing a commit for a no-op project", async () => {
+  const previous = { ...process.env }; const originalFetch = globalThis.fetch;
+  const tools = new Map(); const writes = [];
+  let target = { projectId: "p-0123456789abcdef", refKind: "layer", refId: "32" + "a".repeat(64), layerId: "32" + "a".repeat(64) };
+  try {
+    Object.assign(process.env, env);
+    globalThis.fetch = async (_url, init) => {
+      if (init.method === "GET") return Response.json({ reviewTarget: target });
+      writes.push(JSON.parse(init.body)); return Response.json({ event: { id: "bound-review" } });
+    };
+    apply({ tools: { register(tool) { tools.set(tool.name, tool); return () => {}; } }, systemPrompt: { section() {} }, on() {} });
+    const review = tools.get("camp_review");
+    await review.execute({ outcome: "approved", summary: "Already satisfies acceptance", evidence: "Read-only tests passed", candidate: { commitId: "forged" } }, {});
+    assert.deepEqual(writes[0].artifact.candidate, target);
+    assert.equal("commitId" in writes[0].artifact.candidate, false);
+    target = { projectId: "p-0123456789abcdef", refKind: "commit", refId: "12" + "b".repeat(64), commitId: "12" + "b".repeat(64) };
+    await review.execute({ outcome: "approved", summary: "Implemented and verified", evidence: "Tests passed" }, {});
+    assert.deepEqual(writes[1].artifact.candidate, target);
+    target = { ...target, commitId: "12" + "c".repeat(64) };
+    await assert.rejects(() => review.execute({ outcome: "approved", summary: "Must refuse inconsistent server state", evidence: "No write" }, {}), /inconsistent reference/);
+    assert.equal(writes.length, 2);
   } finally { process.env = previous; globalThis.fetch = originalFetch; }
 });
 

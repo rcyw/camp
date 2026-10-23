@@ -9,7 +9,7 @@ import pg from "pg";
 
 import { closeDatabase, getDb, initDatabase } from "../db/index";
 import * as schema from "../db/schema";
-import { agents, channelAgents, channels, messages, tasks, users } from "../db/schema";
+import { agents, channelAgents, channels, messages, serverMembers, tasks, users } from "../db/schema";
 import { addAgent, addHuman, createChannel } from "./channelService";
 import { createAgent, deleteAgent } from "./agentService";
 import { createServer } from "./serverService";
@@ -380,6 +380,7 @@ test(
         emailVerified: true,
       }).returning();
       const server = await createServer("Receipt Real PG", `receipt-real-pg-${suffix}`, owner.id);
+      await db.insert(serverMembers).values({ serverId: server.id, userId: target.id, role: "member" });
       const channel = await createChannel(server.id, `receipt-real-pg-${suffix}`);
       await addHuman(channel.id, owner.id);
       await addHuman(channel.id, target.id);
@@ -414,9 +415,9 @@ test(
       assert.equal(startedReceipt?.causalActorType, "agent");
       assert.equal(startedReceipt?.causalActorId, agent.id);
     } finally {
+      await closeDatabase().catch(() => {});
       await admin.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(databaseName)} WITH (FORCE)`).catch(() => {});
       await admin.end().catch(() => {});
-      await closeDatabase().catch(() => {});
     }
   },
 );

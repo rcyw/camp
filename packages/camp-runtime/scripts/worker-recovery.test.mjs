@@ -15,18 +15,19 @@ async function fixture() {
   return { home, journal, runtime, record, state, async close() { await rm(home, { recursive: true, force: true }); } };
 }
 
-test('completion response lost after server commit is replayed exactly after journal reopen', async () => {
+for (const status of ['completed', 'suspended']) test(`${status} response lost after server commit is replayed exactly after journal reopen`, async () => {
   const f = await fixture();
   try {
     await f.journal.update(f.record, { cleanupKnown: true });
-    const payload = { workerId: 'original-worker', epoch: 3, status: 'completed', summary: 'the exact result' };
+    const candidate = { type: 'layerfs', projectId: `p-${'a'.repeat(16)}`, refKind: 'layer', refId: `32${'b'.repeat(64)}`, layerId: `32${'b'.repeat(64)}`, rootId: 'c'.repeat(64), imageId: `sha256:${'d'.repeat(64)}` };
+    const payload = { workerId: 'original-worker', epoch: 3, status, summary: 'the exact result', ...(status === 'suspended' ? { questionId: 'durable-question', inputCandidate: candidate, candidate } : {}) };
     await f.journal.prepareCompletion(f.record, payload);
     const bodies = [];
     let effects = 0;
     await assert.rejects(dispatchOutbox({ ...f, request: async (path, body) => { bodies.push(JSON.stringify(body)); if (effects === 0) effects++; throw new TypeError('response lost'); } }), error => error.completionOutcomeUnknown === true);
     const reopened = await new WorkerJournal({ home: f.home, apiUrl: 'http://test', workerId: 'original-worker' }).ready();
     const [record] = await reopened.list();
-    f.state.run.status = 'completed';
+    f.state.run.status = status;
     f.state.leaseValid = false;
     await dispatchOutbox({ journal: reopened, record, state: f.state, request: async (path, body) => { bodies.push(JSON.stringify(body)); return { replayed: true }; } });
     assert.equal(effects, 1);
@@ -156,10 +157,33 @@ test('a pending cancel ack cannot reverse a terminal completion or replay old su
     await f.journal.prepareCancellation(f.record);
     f.state.run.status = 'completed';
     f.state.leaseValid = false;
+    f.state.cleanupState = 'confirmed';
     let posts = 0;
     assert.equal(await dispatchOutbox({ ...f, request: async () => { posts++; } }), 'fenced');
-    await recoverWorker({ ...f, request: async path => { assert.ok(path.startsWith('/reconcile')); return { runs: [] }; } });
+    await recoverWorker({ ...f, request: async path => path.startsWith('/reconcile') ? { runs: [] } : f.state });
     assert.equal(posts, 0);
     assert.ok(f.record.cancellationAck.fencedAt);
+  } finally { await f.close(); }
+});
+
+for (const rejection of ['expired', 'rejected']) test(`a cleaned ${rejection} outbox still acknowledges its original cleanup after recovery`, async () => {
+  const f = await fixture();
+  try {
+    const payload = { workerId: 'original-worker', epoch: 3, status: 'completed', summary: 'Saved immutable result' };
+    await f.journal.update(f.record, { cleanupKnown: true }); await f.journal.prepareCompletion(f.record, payload);
+    if (rejection === 'expired') f.state.leaseValid = false;
+    assert.equal(await dispatchOutbox({ ...f, request: async () => { throw Object.assign(new Error('Rejected'), { status: 409 }); } }), 'fenced');
+    f.state.run.status = 'failed'; f.state.leaseValid = false; f.state.cleanupState = 'unknown';
+    let cleanups = 0, stateReads = 0;
+    const request = async (path, body) => {
+      if (path.startsWith('/reconcile')) return { runs: [] };
+      if (path.endsWith('/state')) { stateReads++; return f.state; }
+      assert.ok(path.endsWith('/cleanup'), 'A fenced outbox must never resubmit the rejected completion');
+      assert.deepEqual(body, { workerId: 'original-worker', epoch: 3 }); cleanups++;
+      f.state.cleanupState = 'confirmed'; return f.state;
+    };
+    await recoverWorker({ ...f, request }); await recoverWorker({ ...f, request });
+    assert.equal(cleanups, 1); assert.equal(stateReads, 1); assert.deepEqual(f.runtime.cleanups, []);
+    const [stored] = await f.journal.list(); assert.equal(stored.phase, 'fenced'); assert.ok(stored.cleanupAck.acknowledgedAt); assert.deepEqual(stored.completion.payload, payload);
   } finally { await f.close(); }
 });

@@ -1,0 +1,28 @@
+[Unit]
+Description=Camp trusted DSH worker (single local Docker storage host)
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+# The current LayerFS adapter needs Docker and direct access to its local Store
+# volume. Adjust these reviewed absolute paths for your deployment.
+User=root
+WorkingDirectory=/opt/camp
+# Parse downloaded configuration with the same Node dotenv parser as manual use.
+Environment=CAMP_WORKER_ONCE=0
+ExecStart=/opt/node24/bin/node --env-file=/etc/camp/runtime.env --env-file=/etc/camp/worker.env --import @oxc-node/core/register /opt/camp/packages/camp-runtime/src/worker.mjs
+UMask=0077
+# Share /tmp's kernel-lock paths with the operator's offline reap command.
+PrivateTmp=no
+NoNewPrivileges=yes
+ProtectSystem=full
+KillMode=mixed
+TimeoutStopSec=120
+# Network interruptions back off inside the worker. Ordinary nonzero exits
+# require operator correction; a killed/crashed process restarts and recovers.
+Restart=on-abnormal
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

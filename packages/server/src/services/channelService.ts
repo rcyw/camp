@@ -3432,6 +3432,9 @@ export async function deleteChannel(channelId: string) {
   // are closed here. Closing only one side would leave the other stuck open in
   // exactly the state this hook exists to prevent.
   await withChannelWriterFence(channelId, async (tx) => {
+    // Camp and task creation hold channel before canonical task rows. Close
+    // the lifecycle in that same order, never task -> channel at the end.
+    await tx.select({ id: channels.id }).from(channels).where(eq(channels.id, channelId)).for("update");
     await tx.update(messages)
       .set({
         taskStatus: "closed",
@@ -3777,6 +3780,11 @@ export async function removeAgent(channelId: string, agentId: string, executor?:
   await assertChannelWritableInTransaction(executor, channelId);
   const db = executor ?? getDb();
   const channel = await getChannel(channelId, { executor: db });
+  // Removing the last private member also writes the channel lifecycle. A
+  // public channel can become private concurrently, so serialize either local
+  // shape before membership, matching Camp's channel -> role fence. This also
+  // covers a Room admitted concurrently; an earlier binding read can miss it.
+  if (channel?.type === "private" || channel?.type === "channel") await db.select({ id: channels.id }).from(channels).where(eq(channels.id, channelId)).for("update");
   if (channel?.type === "thread") {
     throw new Error("Thread membership is managed via follow/unfollow, not channel_agents");
   }
@@ -5675,6 +5683,7 @@ export async function removeHuman(channelId: string, userId: string, executor?: 
   await assertChannelWritableInTransaction(executor, channelId);
   const db = executor ?? getDb();
   const channel = await getChannel(channelId, { executor: db });
+  if (channel?.type === "private" || channel?.type === "channel") await db.select({ id: channels.id }).from(channels).where(eq(channels.id, channelId)).for("update");
   if (channel?.type === "thread") {
     throw new Error("Thread membership is managed via follow/unfollow, not channel_humans");
   }

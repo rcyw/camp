@@ -8,6 +8,9 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { startWorker } from '../src/worker.mjs';
 import { WorkerJournal, acquireWorkerLock } from '../src/durable-state.mjs';
+import { recoverWorker } from '../src/worker-recovery.mjs';
+import { createWorkerDeclaration, serverProtocol, getTaskRequirements } from '../../camp-protocol/src/index.js';
+const compatibility = { status: 'compatible', code: 'compatible', protocolVersion: 1, missingTaskKinds: [], missingRefKinds: [], missingCapabilities: [] };
 
 function deferred() {
   let resolve;
@@ -17,11 +20,12 @@ function deferred() {
 
 /** This fixture runs the real worker and real kernel lock, with no ACP child,
  * Docker/LayerFS operation, provider request, or external API connection. */
-async function fixture({ holdSecondHeartbeat = false, queueProgress = false } = {}) {
+async function fixture({ holdSecondHeartbeat = false, queueProgress = false, holdPreparation = false, stopFailure = false } = {}) {
   const home = await mkdtemp(join(tmpdir(), 'camp-shutdown-'));
   const workerId = `shutdown-test-${randomUUID()}`;
   const signalSource = new EventEmitter();
   const sessionStarted = deferred();
+  const projectPreparing = deferred();
   const secondHeartbeatEntered = deferred();
   const secondHeartbeatReply = deferred();
   const firstProgressEntered = deferred();
@@ -35,16 +39,24 @@ async function fixture({ holdSecondHeartbeat = false, queueProgress = false } = 
     CAMP_WORKER_ID: workerId, CAMP_WORKER_ONCE: '1', CAMP_RUN_TIMEOUT_MS: '20000',
   };
   const claim = { id: 'run-shutdown', roomId: 'room-fixture', role: 'planner', taskId: 'task-fixture', epoch: 1,
+    workflow: 'legacy', taskKind: 'plan', inputCandidate: null, baseRef: 'main', workerProtocol: createWorkerDeclaration(),
     prompt: 'Injected event emitter only', project: {}, runToken: 'fixture-run-capability', leaseExpiresAt: initialLease };
+  claim.protocolVersion = 1;
+  claim.workerProtocol = { version: 1, declaration: createWorkerDeclaration(), requirements: getTaskRequirements(claim) };
   const state = { run: { ...claim, workerId, status: 'running', cancelRequested: false }, leaseValid: true, replaced: false };
   const actions = [], progress = [], completions = [];
   let claimed = false, heartbeats = 0;
   const runtime = {
     home, runIdentity: runId => ({ runId, prefix: `fixture-prefix-${runId}` }),
-    async prepareProject() { actions.push('prepare-project'); return {}; },
+    async prepareProject({ signal }) {
+      actions.push('prepare-project'); projectPreparing.resolve();
+      if (holdPreparation) await new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+      return { projectId: `p-${'a'.repeat(16)}`, imageId: `sha256:${'b'.repeat(64)}` };
+    },
     async prepareRun() { return { runId: 'run-shutdown-e1', containerId: 'fixture', workspacePath: '/fixture' }; },
-    async installDsh() {}, async installPlugin() {},
-    async sandboxApiUrl() { return 'http://127.0.0.1'; }, launchSpec() { return {}; },
+    async pinInputCandidate() { return { type: 'layerfs', projectId: `p-${'a'.repeat(16)}`, imageId: `sha256:${'b'.repeat(64)}`, commitId: `12${'c'.repeat(64)}`, rootId: 'd'.repeat(64) }; },
+    async installDsh() {}, async installPlugin() {}, async quiesceAgent() {},
+    async sandboxHostAddress() { return '127.0.0.1'; }, async sandboxApiUrl() { return 'http://127.0.0.1'; }, launchSpec() { return {}; },
     async archiveSession() { throw new Error('An interrupted turn must not be archived as complete'); },
     async commitCandidate() { throw new Error('An interrupted turn must not produce a candidate'); },
     async releaseRun() { throw new Error('An interrupted turn must use abort cleanup'); },
@@ -52,7 +64,8 @@ async function fixture({ holdSecondHeartbeat = false, queueProgress = false } = 
   };
   const request = async (path, body) => {
     if (path.startsWith('/reconcile')) return { runs: [] };
-    if (path === '/claim') { if (claimed) return { run: null }; claimed = true; return { run: claim }; }
+    if (path === '/protocol') return serverProtocol();
+    if (path === '/claim') { if (claimed) return { run: null, compatibility }; claimed = true; return { run: claim, compatibility }; }
     if (path.endsWith('/heartbeat')) {
       heartbeats += 1;
       if (holdSecondHeartbeat && heartbeats === 2) {
@@ -84,12 +97,12 @@ async function fixture({ holdSecondHeartbeat = false, queueProgress = false } = 
       }
       return { ok: true };
     };
-    session.stop = async () => { actions.push('session-stop'); };
+    session.stop = async () => { actions.push('session-stop'); if (stopFailure) throw new Error('ACP exit remains unconfirmed after SIGKILL'); };
     return session;
   };
   const log = event => { if (event.event === 'completion_acknowledged') completionAcknowledged.resolve(); };
-  return { home, workerId, env, runtime, request, createSession, signalSource, log, actions, progress, completions,
-    initialLease, laterLease, sessionStarted, secondHeartbeatEntered, secondHeartbeatReply,
+  return { home, workerId, env, runtime, request, createSession, admitExecution: async () => {}, checkCapacity: async () => {}, signalSource, log, actions, progress, completions,
+    initialLease, laterLease, sessionStarted, projectPreparing, secondHeartbeatEntered, secondHeartbeatReply,
     firstProgressEntered, firstProgressReply, completionAcknowledged,
     async close() { await rm(home, { recursive: true, force: true }); },
   };
@@ -128,6 +141,29 @@ test('SIGTERM drains an already running periodic heartbeat before releasing its 
     await worker;
     await f.close();
   }
+});
+
+test('SIGTERM cancels first project preparation before any model session starts', { timeout: 5000 }, async () => {
+  const f = await fixture({ holdPreparation: true }), worker = startWorker(f);
+  try {
+    await f.projectPreparing.promise; f.signalSource.emit('SIGTERM'); await worker;
+    assert.equal(f.completions.length, 1); assert.equal(f.completions[0].error, 'worker_shutdown');
+    assert.equal(f.actions.includes('session-stop'), false); assert.ok(f.actions.includes('cleanup'));
+  } finally { f.signalSource.emit('SIGTERM'); await worker; await f.close(); }
+});
+
+test('SIGTERM still removes the owned sandbox when ACP stop rejects, then recovery settles the retained failure', { timeout: 5000 }, async () => {
+  const f = await fixture({ stopFailure: true }), worker = startWorker(f);
+  try {
+    await f.sessionStarted.promise; f.signalSource.emit('SIGTERM'); await worker;
+    assert.ok(f.actions.includes('session-stop')); assert.ok(f.actions.includes('abort'), 'ACP failure cannot bypass physical container removal');
+    assert.equal(f.completions.length, 0, 'Unconfirmed teardown cannot claim a successful cleanup acknowledgement');
+    const journal = await new WorkerJournal({ home: f.home, apiUrl: f.env.CAMP_API_URL, workerId: f.workerId }).ready();
+    const [record] = await journal.list(); assert.equal(record.cleanupKnown, false); assert.equal(record.failureCompletion.error, 'worker_shutdown');
+    await recoverWorker({ journal, runtime: f.runtime, request: f.request });
+    assert.ok(f.actions.includes('cleanup')); assert.equal(f.completions.length, 1); assert.equal(f.completions[0].status, 'failed'); assert.equal(f.completions[0].error, 'worker_shutdown');
+    assert.equal((await journal.list())[0].phase, 'settled');
+  } finally { f.signalSource.emit('SIGTERM'); await worker; await f.close(); }
 });
 
 test('SIGTERM drops queued ordinary progress after the current request settles and preserves one failure completion', { timeout: 10_000 }, async t => {

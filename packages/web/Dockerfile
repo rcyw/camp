@@ -14,6 +14,7 @@ COPY packages/sync-core/package.json packages/sync-core/
 COPY packages/runtime-form/package.json packages/runtime-form/
 COPY packages/shared/package.json packages/shared/
 COPY packages/web/package.json packages/web/
+COPY packages/camp-protocol/package.json packages/camp-protocol/
 
 # Install dependencies (skip Electron binary download — not needed for web)
 ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
@@ -26,6 +27,7 @@ COPY packages/runtime-form/ packages/runtime-form/
 COPY packages/shared/ packages/shared/
 COPY packages/visual-testing/shared/ packages/visual-testing/shared/
 COPY packages/web/ packages/web/
+COPY packages/camp-protocol/ packages/camp-protocol/
 
 # Build web app — VITE_* values are baked in at build time
 ARG VITE_API_URL

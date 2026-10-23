@@ -4,7 +4,7 @@
 
 把一次演示发展成可以持续运行、故障后可以检查和恢复的工作系统。DSH 继续是唯一新增 Agent 执行入口；Camp 管协作事实与调度，可信 Worker 管执行生命周期，LayerFS 管文件版本。
 
-本阶段实现目标分组、预算、恢复日志、可靠结算、遗留 Sandbox 回收和可观察的人工重试。动态拆分及并行候选合并的下一阶段设计见 [工作流与合并设计](./durable-workflows-next.md)。两阶段依赖关系明确：恢复与版本身份稳定后，才能扩大并发。
+本阶段实现目标分组、预算、恢复日志、可靠结算、遗留 Sandbox 回收和可观察的人工重试。后续已加入的有序计划、问题回复和串行交付见 [单 Room 自主交付](./serial-room-workflow.md)，同基线双候选合并见 [可信集成](./trusted-integration.md)；未来并行任务见 [工作流设计](./durable-workflows-next.md)。恢复与版本身份稳定后，才能扩大并发。
 
 ```mermaid
 flowchart LR
@@ -139,4 +139,4 @@ Worker SIGKILL 后模型代理会随宿主进程消失，但容器和工具子�
 
 模型故障实验结果在 `.camp/recovery-latest.json`；对应浏览器和 Worker 日志均位于忽略目录。常驻 Worker 已用本阶段配置连接新的演示 Room。
 
-剩余边界：当前只支持单一 Linux host 和本地共享 runtime home；LayerFS 使用 Disposable Store，这些结果证明进程故障恢复，不证明掉电后的文件系统耐久性。Worker 长期离线时没有独立 host reaper；未知 SDK 结果保留 `requiresInspection`，需要检查后恢复。中断的模型回合不做活进程恢复；完整结果保存前可能需要新的有界执行。请求数和字节预算不是货币成本硬上限，CPU/内存/磁盘/网络硬配额仍待部署阶段实现。动态 DAG、可信合并及自动发布尚未启用。
+当时的剩余边界：只支持单一 Linux host 和本地共享 runtime home；LayerFS 使用 Disposable Store，这些结果证明进程故障恢复，不证明掉电后的文件系统耐久性。Worker 长期离线时没有独立 host reaper；未知 SDK 结果保留 `requiresInspection`。中断的模型回合不做活进程恢复；完整结果保存前可能需要新的有界执行。请求数和字节预算不是货币成本硬上限。后续的 CPU/内存/PID 配额与离线回收见 [单机部署](./single-host-worker.md)，同基线两项可信合并及未知结果的检查封锁见 [可信集成](./trusted-integration.md)；动态 DAG、磁盘硬配额、egress 策略及自动发布尚未启用。

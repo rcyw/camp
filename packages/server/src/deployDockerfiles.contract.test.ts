@@ -311,3 +311,18 @@ test("web Dockerfile includes visual testing fixtures used by web typecheck", ()
     `${dockerfile} must copy visual-testing fixtures before web typecheck`,
   );
 });
+
+// Camp's dependency-free protocol is imported by relative source paths rather
+// than a workspace dependency, so the manifest closure above cannot detect it.
+for (const [dockerfile, entry] of [["packages/server/Dockerfile", "packages/server/src/routes/camp.ts"], ["packages/web/Dockerfile", "packages/web/src/components/camp/CampRoomPanel.tsx"]]) {
+  test(`${dockerfile} packages the directly imported Camp protocol`, () => {
+    assert.match(readFileSync(resolve(repoRoot, entry), "utf8"), /camp-protocol\/src\/index\.js/);
+    const source = readFileSync(resolve(repoRoot, dockerfile), "utf8");
+    const install = source.indexOf("RUN pnpm install --frozen-lockfile");
+    const manifest = source.indexOf("COPY packages/camp-protocol/package.json packages/camp-protocol/");
+    const protocol = source.indexOf("COPY packages/camp-protocol/ packages/camp-protocol/");
+    assert.ok(manifest >= 0 && manifest < install, "Camp protocol manifest must exist before the frozen install");
+    assert.ok(protocol > install, "Camp protocol source must be present in the resulting image");
+    if (dockerfile.includes("web")) assert.ok(protocol < source.indexOf("RUN pnpm --filter @botiverse/raft-web run build"));
+  });
+}

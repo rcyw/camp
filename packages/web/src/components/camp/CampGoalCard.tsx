@@ -2,10 +2,15 @@ import { useCallback, useMemo } from "react";
 import { useIntl } from "react-intl";
 import { ArrowLeft, CheckCircle2, RotateCcw, Square } from "lucide-react";
 import { Button } from "@botiverse/raft-ui";
-import type { CampGoal, CampRun, CampTask } from "./campApi";
+import type { CampGoal, CampIntegrationOperation, CampRun, CampTask } from "./campApi";
 import { CampRunResults } from "./CampRunViews";
 import { campTaskStatusLabel } from "./campStatus";
 import type { MessageId } from "../../i18n/messages/en";
+import CampSerialPlan from "./CampSerialPlan";
+import CampGoalResult from "./CampGoalResult";
+import CampGoalVerificationView from "./CampGoalVerification";
+import CampGoalVersions from "./CampGoalVersions";
+import CampGoalIntegration from "./CampGoalIntegration";
 
 const REASON_LABELS: Partial<Record<string, MessageId>> = {
   run_failed: "camp.reason.run_failed",
@@ -19,6 +24,11 @@ const REASON_LABELS: Partial<Record<string, MessageId>> = {
   channel_unavailable: "camp.reason.channel_unavailable",
   cancel_requested: "camp.reason.cancel_requested",
   cancelled_by_human: "camp.reason.cancelled_by_human",
+  stale_baseline: "camp.reason.stale_baseline",
+  integration_conflict: "camp.reason.integration_conflict",
+  integration_rejected: "camp.reason.integration_rejected",
+  integration_inspection_required: "camp.reason.integration_inspection_required",
+  integration_error: "camp.reason.integration_error",
 };
 
 /** The step cards show actual prerequisites, including blocked dependencies. */
@@ -49,13 +59,17 @@ function GoalSteps({ tasks, runs }: { tasks: CampTask[]; runs: CampRun[] }) {
   );
 }
 
-export default function CampGoalCard({ goal, tasks, runs, busy, onRetry, onCancel }: {
+export default function CampGoalCard({ goal, tasks, runs, busy, onRetry, onCancel, canContinue = false, onContinue, staleBaseline = false, integrationHistory }: {
   goal: CampGoal;
   tasks: CampTask[];
   runs: CampRun[];
   busy: boolean;
   onRetry(goal: CampGoal): Promise<void>;
   onCancel(goal: CampGoal): Promise<void>;
+  canContinue?: boolean;
+  onContinue?(goal: CampGoal): void;
+  staleBaseline?: boolean;
+  integrationHistory?: CampIntegrationOperation[];
 }) {
   const { formatMessage: t, formatNumber } = useIntl();
   const currentTasks = useMemo(() => tasks.filter(task => task.goalAttempt === goal.attempt), [tasks, goal.attempt]);
@@ -64,6 +78,7 @@ export default function CampGoalCard({ goal, tasks, runs, busy, onRetry, onCance
   const cancel = useCallback(() => { if (goal.canCancel) void onCancel(goal); }, [goal, onCancel]);
   const minutes = (seconds: number) => formatNumber(seconds / 60, { maximumFractionDigits: 1 });
   const hasHistory = runs.some(run => run.artifacts.length > 0 || run.error || run.outcome || run.cleanupState === "unknown");
+  const inspectionRequired = goal.integrationInspectionRequired || goal.reason === "integration_inspection_required";
 
   return (
     <article className="flex flex-col gap-4 rounded-xl border border-border-default bg-layer-surface p-4 md:p-5" data-testid={`camp-goal-${goal.id}`}>
@@ -71,6 +86,7 @@ export default function CampGoalCard({ goal, tasks, runs, busy, onRetry, onCance
         <div className="min-w-0 flex-1">
           <h4 className="break-words font-medium">{goal.title}</h4>
           <p className="mt-1 text-xs text-foreground-hint">{t({ id: "camp.goalAttempt" }, { attempt: goal.attempt })}</p>
+          {goal.workflow === "serial" && <p className="mt-1 text-xs text-foreground-hint" data-testid="camp-goal-plan-mode">{t({ id: goal.planMode === "same_baseline_pair" ? "camp.planMode.same_baseline_pair" : "camp.planMode.sequential" })}</p>}
         </div>
         <p className="text-sm font-medium" role="status">{t({ id: `camp.goalStatus.${goal.status}` })}</p>
       </header>
@@ -89,13 +105,20 @@ export default function CampGoalCard({ goal, tasks, runs, busy, onRetry, onCance
       )}
       {goal.status === "cancelling" && <p className="text-xs text-foreground-hint">{t({ id: "camp.goalStoppingHelp" })}</p>}
       {goal.status === "needs_attention" && !goal.canRetry && goal.activeRuns > 0 && <p className="text-xs text-foreground-hint">{t({ id: "camp.recoveryPending" })}</p>}
-      {goal.status === "needs_attention" && !goal.canRetry && goal.activeRuns === 0 && <p className="text-xs text-foreground-hint">{t({ id: "camp.recoveryAdminRequired" })}</p>}
-      <GoalSteps tasks={currentTasks} runs={currentRuns} />
+      {staleBaseline && ["needs_attention", "cancelled"].includes(goal.status) && <p className="text-xs text-foreground-hint">{t({ id: "camp.reason.stale_baseline" })}</p>}
+      {inspectionRequired && <p className="text-xs text-foreground-hint">{t({ id: "camp.integration.inspectionHelp" })}</p>}
+      {goal.status === "needs_attention" && !goal.canRetry && goal.activeRuns === 0 && !staleBaseline && !inspectionRequired && <p className="text-xs text-foreground-hint">{t({ id: "camp.recoveryAdminRequired" })}</p>}
+      {goal.metrics && <section aria-label={t({ id: "camp.metrics.title" })} className="grid gap-2 text-xs sm:grid-cols-3"><p>{t({ id: "camp.metrics.items" })}: {goal.metrics.itemsApproved} / {goal.metrics.itemsTotal}</p><p>{t({ id: "camp.metrics.questions" })}: {goal.metrics.questionsAnswered} / {goal.metrics.questionsAsked}</p><p>{t({ id: "camp.metrics.reworks" })}: {goal.metrics.reworks}</p><p>{t({ id: "camp.metrics.humanAnswers" })}: {goal.metrics.humanAnswers}</p><p>{t({ id: "camp.metrics.agentAnswers" })}: {goal.metrics.agentAnswers}</p><p>{t({ id: "camp.metrics.manualRetries" })}: {goal.metrics.manualRetries}</p></section>}
+      {goal.workflow === "serial" ? <CampSerialPlan goal={goal} tasks={currentTasks} runs={currentRuns} /> : <GoalSteps tasks={currentTasks} runs={currentRuns} />}
+      <CampGoalIntegration goal={goal} history={integrationHistory} />
+      <CampGoalVerificationView goal={goal} />
+      <CampGoalResult goal={goal} canContinue={canContinue} onContinue={onContinue} />
+      {goal.workflow === "serial" && <CampGoalVersions goal={goal} />}
       {(goal.canRetry || goal.canCancel) && (
         <div className="flex flex-wrap items-center gap-2">
           {goal.canRetry && <Button variant="outline" size="sm" disabled={busy} onClick={retry}><RotateCcw size={13} />{t({ id: "camp.retryGoal" })}</Button>}
           {goal.canCancel && <Button variant="ghost" size="sm" disabled={busy} onClick={cancel}><Square size={12} />{t({ id: "camp.cancelGoal" })}</Button>}
-          {goal.canRetry && <p className="text-xs text-foreground-hint">{t({ id: "camp.retryGoalHelp" })}</p>}
+          {goal.canRetry && <p className="text-xs text-foreground-hint">{t({ id: goal.planMode === "same_baseline_pair" ? "camp.integration.retryGoalHelp" : "camp.retryGoalHelp" })}</p>}
         </div>
       )}
       {hasHistory && <details className="border-t border-border-default pt-3"><summary className="mb-3 cursor-pointer text-sm">{t({ id: "camp.goalHistory" })}</summary><CampRunResults runs={runs} /></details>}

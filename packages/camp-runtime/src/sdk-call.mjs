@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 if (String(process.ppid) !== process.env.CAMP_SDK_OWNER_PID) process.exit(1);
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
-const { source, projectId, config, method, args } = JSON.parse(input);
+const { sdkEntry, projectId, config, method, args } = JSON.parse(input);
 Object.assign(process.env, {
   LAYERFS_HOME: config.home,
   LAYERFS_NATIVE: config.native,
@@ -15,11 +15,16 @@ Object.assign(process.env, {
   LAYERFS_STORE_PATH: config.storePath,
   LAYERFS_CONTAINER_PREFIX: config.prefix,
 });
-const { LayerFS } = await import(pathToFileURL(`${source}/sdk/js/src/index.js`).href);
+const { LayerFS } = await import(pathToFileURL(sdkEntry).href);
 const client = new LayerFS(projectId, { storePath: config.storePath });
 try {
   const [group, operation] = method.split('.');
-  const result = await client[group][operation](...args);
+  // The JS SDK wrapper exposes paged listings; the public native operation
+  // additionally supports its indexed exact-name lookup. Integration uses
+  // that read to inspect deterministic branches without scanning all history.
+  const result = method === 'project.branch_info'
+    ? await client.call('project.list_branches', { name: args[0], pageSize: 1, pagePos: 0 })
+    : await client[group][operation](...args);
   process.stdout.write(JSON.stringify({ result }) + '\n');
 } catch (error) {
   process.stdout.write(JSON.stringify({ error: { message: error.message, code: error.code, detail: error.detail } }) + '\n');
