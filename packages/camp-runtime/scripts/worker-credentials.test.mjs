@@ -23,6 +23,8 @@ test('private credentials reject links, public modes, malformed values and ambig
     const linkedPath = join(f.home, 'linked'); await symlink(f.path, linkedPath); await assert.rejects(readWorkerCredential(linkedPath), { code: 'camp_credential_invalid' });
     const alias = join(f.home, 'hardlink'); await link(f.path, alias); await assert.rejects(readWorkerCredential(f.path), { code: 'camp_credential_invalid' }); await unlink(alias);
     await assert.rejects(managedWorkerCredential({ env: { ...f.env, CAMP_WORKER_TOKEN: f.value.token } }), { code: 'camp_credential_invalid' });
+    await assert.rejects(managedWorkerCredential({ env: { ...f.env, CAMP_WORKER_ROOM_ID: randomUUID() } }), { code: 'camp_credential_invalid' });
+    await assert.rejects(managedWorkerCredential({ env: { CAMP_API_URL: f.env.CAMP_API_URL, CAMP_WORKER_TOKEN: f.value.token, CAMP_WORKER_ROOM_ID: f.value.roomId } }), { code: 'camp_credential_invalid' });
     await assert.rejects(managedWorkerCredential({ env: { ...f.env, CAMP_API_URL: 'http://remote.example.test' } }), { code: 'camp_credential_invalid' });
     await writeFile(f.path, JSON.stringify({ ...f.value, token: 'invalid' })); await assert.rejects(readWorkerCredential(f.path), { code: 'camp_credential_invalid' });
     await writeFile(f.path, JSON.stringify({ ...f.value, expiresAt: new Date(f.now + 100 * day).toISOString() })); await assert.rejects(readWorkerCredential(f.path), { code: 'camp_credential_invalid' });
@@ -33,7 +35,7 @@ test('simultaneous lanes share renewal, durably persist metadata and keep pendin
   const f = await fixture(); let renewals = 0, published = false;
   try {
     const next = { ...f.value, expiresAt: new Date(f.now + 7 * day).toISOString() }; delete next.token;
-    const { env, request } = await managedWorkerCredential({ env: f.env, now: () => f.now, request: async route => {
+    const { env, request } = await managedWorkerCredential({ env: { ...f.env, CAMP_WORKER_ROOM_ID: f.value.roomId }, now: () => f.now, request: async route => {
       if (route === '/credential/renew') { renewals++; await new Promise(resolve => setImmediate(resolve)); return next; }
       published = JSON.parse(await readFile(f.path, 'utf8')).expiresAt === next.expiresAt; return { ready: true };
     } });
@@ -73,7 +75,7 @@ test('revocation, expiry and a disk publication failure admit no ordinary API re
           if (['revoked', 'expired'].includes(failure)) throw Object.assign(new Error('rejected'), { status: 401, code: 'camp_auth_required' });
           return { ...f.value, tokenId: failure === 'foreign' ? randomUUID() : f.value.tokenId, expiresAt: new Date(f.now + 7 * day).toISOString() };
         } });
-      await assert.rejects(managed.request('/claim', {}), failure === 'storage' ? { code: 'camp_credential_storage' } : failure === 'foreign' ? { code: 'camp_credential_invalid' } : { status: 401 });
+      await assert.rejects(managed.request('/claim', {}), failure === 'storage' ? { code: 'camp_credential_storage', status: 409 } : failure === 'foreign' ? { code: 'camp_credential_invalid', status: 409 } : { status: 401 });
       assert.equal(ordinary, 0); assert.deepEqual(await readWorkerCredential(f.path), f.value);
     } finally { await f.close(); }
   }

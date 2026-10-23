@@ -6,7 +6,10 @@ import { workerApiRequest, workerApiUrl } from './worker-preflight.mjs';
 
 const renewalWindowMs = 6 * 86400_000;
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
-const fail = (code = 'camp_credential_invalid') => Object.assign(new Error('The private Worker credential file is unavailable or invalid; inspect its ownership, renewal policy and Room binding'), { code });
+// The existing Worker retries transport errors without status. Local credential
+// corruption and failed durable publication require inspection and must drain
+// both lanes instead of being mistaken for a temporary network interruption.
+const fail = (code = 'camp_credential_invalid') => Object.assign(new Error('The private Worker credential file is unavailable or invalid; inspect its ownership, renewal policy and Room binding'), { code, status: 409 });
 
 function metadata(value) {
   if (!value || value.schemaVersion !== 1 || !uuid.test(value.tokenId) || !uuid.test(value.roomId)
@@ -38,11 +41,15 @@ export async function readWorkerCredential(path) {
  * must still be retried because an earlier response could have been lost. */
 export async function managedWorkerCredential({ env = process.env, request, now = Date.now, persist = atomicJson } = {}) {
   const path = env.CAMP_WORKER_CREDENTIAL_FILE;
-  if (!path) return { env, request: request ?? workerApiRequest(env) };
+  if (!path) {
+    if (env.CAMP_WORKER_ROOM_ID !== undefined) throw fail();
+    return { env, request: request ?? workerApiRequest(env) };
+  }
   if (env.CAMP_WORKER_TOKEN) throw fail();
   const url = new URL(workerApiUrl(env));
   if (url.protocol !== 'https:' && !['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname)) throw fail();
   let credential = await readWorkerCredential(path), renewal;
+  if (env.CAMP_WORKER_ROOM_ID !== undefined && (!uuid.test(env.CAMP_WORKER_ROOM_ID) || credential.roomId !== env.CAMP_WORKER_ROOM_ID)) throw fail();
   const selectedEnv = { ...env, CAMP_WORKER_TOKEN: credential.token };
   const api = request ?? workerApiRequest(selectedEnv);
   const renew = async () => {
