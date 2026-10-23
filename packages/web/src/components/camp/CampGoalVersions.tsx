@@ -76,7 +76,10 @@ export default function CampGoalVersions({ goal }: { goal: CampGoal }) {
   const select = useCallback((event: ChangeEvent<HTMLSelectElement>) => setSelectedId(event.target.value), []);
   const operationRevision = goal.verification?.operations.map(operation => `${operation.id}:${operation.status}:${operation.latestRunId}`).join("|");
   const integrationRevision = goal.integration?.operations.map(operation => `${operation.id}:${operation.status}:${operation.latestRunId}:${operation.integrationReport?.status}`).join("|");
-  const historyKey = `${goal.attempt}:${goal.status}:${(goal.finalCandidate ?? goal.currentCandidate)?.refId}:${operationRevision}:${integrationRevision}:${revision}`;
+  // Parallel items publish independently while the global candidate remains
+  // the shared baseline. Their immutable milestones also refresh the list.
+  const itemRevision = JSON.stringify(goal.items?.map(item => [item.key, item.status, item.reworkCount, item.candidate ? candidateIdentity(item.candidate) : null, item.reviews.at(-1)?.runId]));
+  const historyKey = `${goal.attempt}:${goal.status}:${(goal.finalCandidate ?? goal.currentCandidate)?.refId}:${operationRevision}:${integrationRevision}:${itemRevision}:${revision}`;
   return (
     <details className="min-w-0 rounded-lg border border-border-default p-4" onToggle={event => setOpen(event.currentTarget.open)} data-testid={`camp-versions-${goal.id}`}>
       <summary className="cursor-pointer text-sm font-medium">{t({ id: "camp.versions.title" })}</summary>

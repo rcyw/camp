@@ -3,9 +3,9 @@ import type {
   CampArtifact, CampBudget, CampCandidate, CampCleanupState, CampFinalSummary,
   CampGoalStatus, CampMetrics, CampNegotiatedProtocol, CampPlan, CampQuestion, CampResultManifest,
   CampRole, CampRunStatus, CampTaskKind, CampTaskRequirements, CampTaskStatus,
-  CampWorkItem, CampWorkerCompatibility, CampWorkerDeclaration, CampWorkflow,
+  CampWorkItem as ProtocolWorkItem, CampWorkerCompatibility, CampWorkerDeclaration, CampWorkflow,
   CampChangeSet, CampOperationStatus, CampVerificationPolicy, CampVerificationPolicySnapshot, CampVerificationReceipt,
-  CampPreflightReport, CampPlanMode, CampIntegrationInput, CampIntegrationReceipt,
+  CampPreflightReport, CampPlanMode, CampIntegrationInput, CampIntegrationReceipt, CampExecutionPool,
 } from "../../../../camp-protocol/src/index.js";
 
 // Keep component imports stable while the wire contract has one definition.
@@ -14,16 +14,19 @@ export type {
   CampFinalSummary, CampGoalStatus, CampMetrics, CampNegotiatedProtocol, CampPlan, CampPlanItem,
   CampQuestion, CampQuestionStatus, CampReference, CampResultManifest,
   CampReview, CampReviewRecord, CampReviewTarget, CampRole, CampRunStatus,
-  CampTaskKind, CampTaskRequirements, CampTaskStatus, CampWorkItem,
+  CampTaskKind, CampTaskRequirements, CampTaskStatus,
   CampWorkerCompatibility, CampWorkerDeclaration, CampWorkflow,
   CampChangeSet, CampChangeEntry, CampChangeSide, CampOperationStatus,
   CampVerificationPolicy, CampVerificationPolicySnapshot, CampVerificationReceipt,
   CampPreflightReport, CampPreflightCheck, CampPreflightCheckId,
-  CampPlanMode, CampIntegrationInput, CampIntegrationReport, CampIntegrationReceipt,
+  CampPlanMode, CampIntegrationInput, CampIntegrationReport, CampIntegrationReceipt, CampExecutionPool,
 } from "../../../../camp-protocol/src/index.js";
 export type CampStatus = CampRunStatus;
 export type CampResult = CampResultManifest;
 export type CampOutcome = NonNullable<CampArtifact["outcome"]>;
+export type CampWorkItem = ProtocolWorkItem & {
+  scheduling?: { state: "ready" | "running" | "waiting_capacity" | "waiting_review" | "waiting_question" | "approved" | "blocked" | "pending"; reason: string | null };
+};
 
 // Public room projections remain browser DTOs, composed from shared domain types.
 export interface CampGoal {
@@ -49,6 +52,7 @@ export interface CampGoal {
   verification?: CampGoalVerification;
   integration?: CampGoalIntegration;
   integrationInspectionRequired?: boolean;
+  executionPool?: CampExecutionPool | null;
   resultReady?: boolean;
   baseHeadRevision?: number;
   fromGoalId?: string | null;
@@ -65,6 +69,7 @@ export interface CampRoom {
   id: string;
   channelId: string;
   name: string;
+  storageId?: string | null;
   project: { name: string; repoPath?: string; baseRef?: string; storePath?: string };
   roles: Array<{ role: CampRole; agentId: string; instructions?: string }>;
   acceptedHead?: { revision: number; goalId: string | null; candidate: CampCandidate | null };
@@ -92,6 +97,8 @@ export interface CampRun {
   epoch: number;
   status: CampRunStatus;
   leaseExpiresAt?: string;
+  leaseValid?: boolean;
+  workerId?: string;
   summary: string | null;
   error: string | null;
   sessionId: string | null;
@@ -146,7 +153,7 @@ export interface CampIntegrationOperation {
 }
 export interface CampGoalIntegration {
   required: boolean;
-  status: "not_required" | "pending" | "queued" | "running" | "merged" | "conflict" | "rejected" | "failed" | "cancelled" | "blocked";
+  status: "not_required" | "not_run" | "pending" | "queued" | "running" | "merged" | "conflict" | "rejected" | "failed" | "cancelled" | "blocked";
   operations: CampIntegrationOperation[];
 }
 export interface CampVersion {

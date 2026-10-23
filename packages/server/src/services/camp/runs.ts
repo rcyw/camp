@@ -1,4 +1,4 @@
-import { CAMP_PROTOCOL_VERSION, CAMP_SUPPORTED_PROTOCOL_VERSIONS, checkWorkerCompatibility, getTaskRequirements, parseChangeSet, parseWorkerDeclaration, type CampWorkerDeclaration, type CampTaskRequirements, type CampWorkerCompatibility } from "../../../../camp-protocol/src/index.js";
+import { CAMP_PROTOCOL_VERSION, CAMP_SUPPORTED_PROTOCOL_VERSIONS, checkWorkerCompatibility, getTaskRequirements, parseChangeSet, parseWorkerDeclaration, type CampWorkerDeclaration, type CampTaskRequirements, type CampWorkerCompatibility, type CampClaimAdmission } from "../../../../camp-protocol/src/index.js";
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import { getDb, type DatabaseExecutor } from "../../db/index";
@@ -6,6 +6,7 @@ import { agents, campEvents, campFinalizations, campGoals, campOperations, campQ
 import { createMessage } from "../messageService";
 import { checkedVerificationReport, finishVerification, requireVerificationGate } from "./verification";
 import { checkedIntegrationReport, finishIntegration } from "./integration";
+import { pinExecutionPool, poolCompatibility, roomOccupancy } from "./executionPool";
 import { observeWorker } from "./workerCompatibility";
 import { withCampTaskMutation } from "./taskAuthority";
 import { assignTask, createTasks, forceUpdateTaskStatus, updateTaskStatus } from "../taskService";
@@ -40,8 +41,8 @@ async function integrationContext(tx: DatabaseExecutor, room: Room, run: Run) {
   requireOperationRun(run);
   const [operation] = await tx.select().from(campOperations).where(eq(campOperations.id, run.operationId));
   const [goal] = await tx.select().from(campGoals).where(eq(campGoals.id, operation.goalId));
-  if (operation.kind !== "integration" || !operation.integrationInput || !operation.inputDigest || run.workerProtocol?.version !== 3) throw fail("The integration contract is missing");
-  return { id: run.id, executor: "integration" as const, operationId: operation.id, taskId: null, role: null, agentId: null, taskKind: "integration" as const, roomId: room.id, goalId: goal.id, goalAttempt: operation.goalAttempt, epoch: run.epoch, leaseExpiresAt: run.leaseExpiresAt.toISOString(), workflow: "serial" as const, planMode: goal.planMode, protocolVersion: 3 as const, workerProtocol: run.workerProtocol, inputCandidate: operation.inputCandidate, goalBaseline: operation.integrationInput.base, baseRef: operation.inputCandidate.refId, integrationInput: operation.integrationInput, inputDigest: operation.inputDigest, project: room.project };
+  if (operation.kind !== "integration" || !operation.integrationInput || !operation.inputDigest || !run.workerProtocol || ![3, 4].includes(run.workerProtocol.version)) throw fail("The integration contract is missing");
+  return { id: run.id, executor: "integration" as const, operationId: operation.id, taskId: null, role: null, agentId: null, taskKind: "integration" as const, roomId: room.id, goalId: goal.id, goalAttempt: operation.goalAttempt, epoch: run.epoch, leaseExpiresAt: run.leaseExpiresAt.toISOString(), workflow: "serial" as const, planMode: goal.planMode, protocolVersion: run.workerProtocol?.version ?? goal.protocolVersion!, workerProtocol: run.workerProtocol, inputCandidate: operation.inputCandidate, goalBaseline: operation.integrationInput.base, baseRef: operation.inputCandidate.refId, integrationInput: operation.integrationInput, inputDigest: operation.inputDigest, project: room.project };
 }
 async function verificationContext(tx: DatabaseExecutor, room: Room, run: Run) {
   requireVerificationRun(run);
@@ -154,7 +155,7 @@ async function executionContext(tx: DatabaseExecutor, room: Room, run: Run) {
     `Task: ${task.title}`, task.description,
     "Stay within this role. Report progress and candidate artifacts. The trusted worker owns claim, completion and handoff. Never publish to main automatically.",
     reviewTask ? "Review and test the selected candidate. Before finishing, call camp_review with outcome approved or changes_requested, a summary, and a nonempty evidence string describing the checks. The verdict binds the server-selected candidate. A prose verdict cannot complete this review." : undefined,
-    goal.workflow === "serial" && binding.kind === "plan" ? plan ? `This attempt already has an immutable plan. Do not replace it: ${JSON.stringify(plan)}` : goal.planMode === "same_baseline_pair" ? "Submit exactly two independent plan items with camp_submit_plan. Both builds start from the same immutable baseline, so neither item may depend on the other item. Then finish." : "Inspect the original goal and submit one to five ordered, independently reviewable items with camp_submit_plan. Each item needs key/title/description/acceptance/verification. Then finish this planning turn." : undefined,
+    goal.workflow === "serial" && binding.kind === "plan" ? plan ? `This attempt already has an immutable plan. Do not replace it: ${JSON.stringify(plan)}` : ["same_baseline_pair", "parallel_pair"].includes(goal.planMode) ? "Submit exactly two independent plan items with camp_submit_plan. Both builds start from the same immutable baseline, so neither item may depend on the other item. Then finish." : "Inspect the original goal and submit one to five ordered, independently reviewable items with camp_submit_plan. Each item needs key/title/description/acceptance/verification. Then finish this planning turn." : undefined,
     goal.workflow === "serial" && binding.kind !== "build" ? "This task is read-only: inspect and run checks without changing workspace content. The worker will reject a changed content root." : undefined,
     verificationReceipt ? `Independent operator verification receipt (server-owned): ${JSON.stringify(verificationReceipt)}. Use these actual termination results as evidence; model prose cannot replace this gate.` : undefined,
     binding.kind === "summary" ? "Before ending, call camp_finalize with the final delivery summary, evidence, and remaining limitations. The server supplies the reviewed candidate; do not choose a candidate ID." : undefined,
@@ -260,12 +261,14 @@ export async function reconcileCampRoom(tx: DatabaseExecutor, room: Room) {
 export type CampClaimIntent = { claimId: string; runToken: string };
 
 /** Every Camp lifecycle operation locks its room first, then uses Raft task writers. */
-export async function claimRunDetailed(principal: CampPrincipal, workerId: string, intent?: CampClaimIntent, declaration?: CampWorkerDeclaration): Promise<{ run: CampClaimedRun | null; closed?: boolean; compatibility?: CampWorkerCompatibility | null; requirements?: CampTaskRequirements | null }> {
+export async function claimRunDetailed(principal: CampPrincipal, workerId: string, intent?: CampClaimIntent, declaration?: CampWorkerDeclaration, restoreOnly = false): Promise<{ run: CampClaimedRun | null; closed?: boolean; unbound?: boolean; admission?: CampClaimAdmission; compatibility?: CampWorkerCompatibility | null; requirements?: CampTaskRequirements | null }> {
   requireWorker(principal);
-  const protocol = declaration === undefined ? null : parseWorkerDeclaration(declaration);
+  if (restoreOnly && !intent) throw new CampError(400, "claim_intent_required", "Restore-only claims require the original claim identifier and credential");
   return getDb().transaction(async tx => {
-    const room = await lockRoom(tx, principal.roomId);
+    const [existingRoom] = await tx.select().from(campRooms).where(eq(campRooms.id, principal.roomId)).for("update");
+    if (!existingRoom) throw new CampError(404, "room_not_found", "Room not found");
     await validateWorker(tx, principal);
+    const room = existingRoom;
     if (intent) {
       const [claimed] = await tx.select().from(campRuns).where(and(eq(campRuns.roomId, room.id), eq(campRuns.claimId, intent.claimId)));
       if (claimed) {
@@ -279,20 +282,31 @@ export async function claimRunDetailed(principal: CampPrincipal, workerId: strin
         return { run: await claimedContext(tx, room, claimed, intent.runToken), ...(claimed.workerProtocol ? { compatibility: checkWorkerCompatibility(claimed.workerProtocol.declaration, claimed.workerProtocol.requirements), requirements: claimed.workerProtocol.requirements } : {}) };
       }
     }
+    if (restoreOnly) return { run: null, unbound: true };
+    const protocol = declaration === undefined ? null : parseWorkerDeclaration(declaration);
+    await lockRoom(tx, room.id);
     await reconcileCampRoom(tx, room);
     let incompatibility: CampWorkerCompatibility | null = null;
     let incompatibleRequirements: CampTaskRequirements | null = null;
-    const bindings = await tx.select().from(campTasks).where(eq(campTasks.roomId, room.id)).orderBy(asc(campTasks.createdAt), asc(campTasks.taskId));
-    const running = await tx.select({ agentId: campRuns.agentId }).from(campRuns).where(and(eq(campRuns.roomId, room.id), eq(campRuns.status, "running")));
+    const waiting: { value?: { compatibility: CampWorkerCompatibility; requirements: CampTaskRequirements; admission: CampClaimAdmission } } = {};
+    const waitFor = (compatibility: CampWorkerCompatibility, requirements: CampTaskRequirements, reason: CampClaimAdmission["reason"]) => {
+      waiting.value ??= { compatibility, requirements, admission: { status: "waiting", reason } };
+    };
+    const bindings = await tx.select().from(campTasks).where(eq(campTasks.roomId, room.id)).orderBy(sql`CASE WHEN ${campTasks.kind} = 'clarification' THEN 0 WHEN ${campTasks.kind} = 'review' THEN 1 ELSE 2 END`, sql`(SELECT task_number FROM tasks WHERE id = ${campTasks.taskId})`, asc(campTasks.taskId));
+    const occupied = await roomOccupancy(tx, room.id);
     const operations = await tx.select().from(campOperations).where(and(eq(campOperations.roomId, room.id), eq(campOperations.status, "queued"))).orderBy(asc(campOperations.createdAt), asc(campOperations.id));
     for (const operation of operations) {
-      if (running.length) break;
       const [goal] = await tx.select().from(campGoals).where(and(eq(campGoals.id, operation.goalId), eq(campGoals.attempt, operation.goalAttempt)));
       if (!goal || !["queued", "running"].includes(goal.status)) continue;
       const requirements = getTaskRequirements({ protocolVersion: goal.protocolVersion, workflow: "serial", taskKind: operation.kind, inputCandidate: operation.inputCandidate, verificationPolicy: operation.verificationPolicy });
-      const compatibility = checkWorkerCompatibility(protocol, requirements);
+      const compatibility = poolCompatibility(room, goal, workerId, protocol, checkWorkerCompatibility(protocol, requirements));
       if (compatibility.status !== "compatible") { incompatibility ??= compatibility; incompatibleRequirements ??= requirements; continue; }
+      if (occupied.length) {
+        waitFor(compatibility, requirements, occupied.some(run => run.status !== "running") ? "cleanup_pending" : "room_capacity");
+        continue;
+      }
       if (goal.runCount >= goal.budget.maxRuns) { await stopGoal(tx, room, goal, "run_budget_exhausted"); continue; }
+      await pinExecutionPool(tx, room, goal, protocol);
       const runToken = intent?.runToken ?? newCampToken("run"), epoch = operation.attempt + 1;
       const [run] = await tx.insert(campRuns).values({ executor: operation.kind, operationId: operation.id, roomId: room.id, epoch, workerId, claimId: intent?.claimId, runTokenHash: hashCampToken(runToken), workerProtocol: { version: compatibility.protocolVersion!, declaration: protocol!, requirements }, leaseExpiresAt: nextLease(), inputCandidate: operation.inputCandidate }).returning();
       await tx.update(campOperations).set({ status: "running", attempt: epoch }).where(eq(campOperations.id, operation.id));
@@ -304,8 +318,7 @@ export async function claimRunDetailed(principal: CampPrincipal, workerId: strin
     for (const binding of bindings) {
       if (binding.status !== "queued" || binding.dependsOn.some(id => bindings.find(other => other.taskId === id)?.status !== "completed")) continue;
       const [goal] = await tx.select().from(campGoals).where(and(eq(campGoals.id, binding.goalId), eq(campGoals.attempt, binding.goalAttempt)));
-      if (!goal || !["queued", "running"].includes(goal.status)) continue;
-      if (goal.workflow === "serial" && running.length) continue;
+      if (!goal || !["queued", "running", "waiting_question"].includes(goal.status)) continue;
       const { inputCandidate: selectedInput } = await effectiveExecutionInput(tx, binding, goal);
       const missingFrozenVersion = goal.workflow === "serial" && goal.protocolVersion === null;
       const requirements = getTaskRequirements({ protocolVersion: missingFrozenVersion ? CAMP_PROTOCOL_VERSION : goal.protocolVersion ?? (protocol ? [...CAMP_SUPPORTED_PROTOCOL_VERSIONS].filter(version => version <= 2 && protocol.protocolVersions.includes(version)).sort((a, b) => b - a)[0] ?? 2 : null), workflow: goal.workflow, taskKind: binding.kind, inputCandidate: selectedInput, verificationPolicy: goal.verificationPolicy });
@@ -316,14 +329,24 @@ export async function claimRunDetailed(principal: CampPrincipal, workerId: strin
         incompatibleRequirements ??= { ...requirements, protocolVersion: null };
         continue;
       }
-      const compatibility = checkWorkerCompatibility(protocol, requirements);
+      const compatibility = poolCompatibility(room, goal, workerId, protocol, checkWorkerCompatibility(protocol, requirements));
       if (compatibility.status === "incompatible") {
         incompatibility ??= compatibility; incompatibleRequirements ??= requirements;
         continue;
       }
       if (goal.runCount >= goal.budget.maxRuns) { await stopGoal(tx, room, goal, "run_budget_exhausted"); continue; }
+      const parallel = goal.planMode === "parallel_pair";
+      const occupiedLane = occupied.find(run => run.workerId === workerId || run.taskId === binding.taskId);
+      if (occupiedLane) { waitFor(compatibility, requirements, occupiedLane.status === "running" ? "lane_busy" : "cleanup_pending"); continue; }
+      if (goal.workflow === "serial" && (parallel ? occupied.length >= 2 || occupied.some(run => run.executor !== "agent") : occupied.length > 0)) {
+        waitFor(compatibility, requirements, occupied.some(run => run.status !== "running") ? "cleanup_pending" : occupied.some(run => run.executor !== "agent") ? "system_operation_busy" : "room_capacity");
+        continue;
+      }
       const role = room.roles.find(row => row.role === binding.role);
-      if (!role || running.some(run => run.agentId === role.agentId)) continue;
+      if (!role) continue;
+      const roleRuns = occupied.filter(run => run.agentId === role.agentId);
+      const parallelBuild = parallel && binding.kind === "build" && roleRuns.every(run => bindings.find(value => value.taskId === run.taskId)?.kind === "build");
+      if (roleRuns.length >= (parallelBuild ? 2 : 1)) { waitFor(compatibility, requirements, "role_busy"); continue; }
       if (!await roleAvailable(tx, room, role.agentId)) continue;
       const [canonical] = await tx.select().from(tasks).where(eq(tasks.id, binding.taskId)).for("update");
       const unassigned = canonical?.claimedByType === null && canonical.claimedById === null && canonical.status === "todo";
@@ -338,6 +361,7 @@ export async function claimRunDetailed(principal: CampPrincipal, workerId: strin
       }
       assertMutation(await withCampTaskMutation(room.id, binding.taskId, () => assignTask(binding.taskId, { type: "agent", id: role.agentId }, "agent", role.agentId)));
       await taskState(room.id, binding.taskId, "in_progress", role.agentId);
+      await pinExecutionPool(tx, room, goal, protocol);
       const runToken = intent?.runToken ?? newCampToken("run");
       const epoch = binding.attempt + 1;
       await tx.update(campTasks).set({ status: "running", attempt: epoch }).where(eq(campTasks.taskId, binding.taskId));
@@ -348,8 +372,12 @@ export async function claimRunDetailed(principal: CampPrincipal, workerId: strin
       await observeWorker(tx, room.id, workerId, protocol, compatibility, requirements, run.id);
       return { run: { ...await executionContext(tx, room, run), runToken }, compatibility, requirements };
     }
-    await observeWorker(tx, room.id, workerId, protocol, incompatibility, incompatibleRequirements);
-    return { run: null, compatibility: incompatibility, requirements: incompatibleRequirements };
+    // A compatible candidate waiting on physical or role capacity is more
+    // useful than a different, earlier task this binary cannot execute. Keep
+    // that positive observation rather than erasing it on every idle poll.
+    const observation = waiting.value ?? { compatibility: incompatibility, requirements: incompatibleRequirements };
+    await observeWorker(tx, room.id, workerId, protocol, observation.compatibility, observation.requirements);
+    return { run: null, ...observation };
   });
 }
 
@@ -603,7 +631,7 @@ export async function completeRun(principal: CampPrincipal, runId: string, worke
     if ((successful || suspended) && durationExpired) throw new CampError(409, "duration_budget_exhausted", "The goal duration budget expired before completion");
     let serialCandidates: ReturnType<typeof completionCandidates> | null = null;
     if (goal.workflow === "serial" && (successful || suspended)) serialCandidates = completionCandidates(existing.inputCandidate ?? binding.inputCandidate ?? goal.baseCandidate, binding.kind, input);
-    if (successful && (existing.workerProtocol?.version ?? 0) >= 2 && binding.kind === "build" && (!changeSet || !(goal.baseCandidate ?? reportedInput) || !sameCandidate(changeSet.base, goal.baseCandidate ?? reportedInput) || !sameCandidate(changeSet.target, reportedOutput))) throw new CampError(409, "change_set_required", "A completed v2 build must attest its cumulative change set from the goal baseline to its exact output");
+    if (successful && goal.workflow === "serial" && (existing.workerProtocol?.version ?? 0) >= 2 && binding.kind === "build" && (!changeSet || !(goal.baseCandidate ?? reportedInput) || !sameCandidate(changeSet.base, goal.baseCandidate ?? reportedInput) || !sameCandidate(changeSet.target, reportedOutput))) throw new CampError(409, "change_set_required", "A completed serial v2 build must attest its cumulative change set from the goal baseline to its exact output");
     if (suspended && goal.workflow !== "serial") throw new CampError(400, "serial_workflow_required", "Question suspension is available only in a serial workflow");
     const pending = goal.workflow === "serial" ? await blockingQuestion(tx, binding.taskId, run.id) : null;
     if (successful && pending) throw new CampError(409, "question_requires_suspend", "Checkpoint and suspend this task before its pending question can be answered");
@@ -661,6 +689,8 @@ export async function cancelRun(roomId: string, runId: string, userId: string) {
     const [run] = await tx.select().from(campRuns).where(and(eq(campRuns.id, runId), eq(campRuns.roomId, roomId))).for("update");
     if (!run) throw new CampError(404, "run_not_found", "Run not found");
     if (run.status !== "running") throw fail("The run has already ended");
+    const [owner] = await tx.select({ goal: campGoals }).from(campGoals).leftJoin(campTasks, eq(campTasks.goalId, campGoals.id)).leftJoin(campOperations, eq(campOperations.goalId, campGoals.id)).where(and(eq(campGoals.roomId, roomId), run.taskId ? eq(campTasks.taskId, run.taskId) : eq(campOperations.id, run.operationId!))).limit(1);
+    if (owner?.goal.planMode === "parallel_pair") await stopGoal(tx, room, owner.goal, "cancelled_by_human", true);
     const [requested] = await tx.update(campRuns).set({ cancelRequestedAt: sql`now()` }).where(eq(campRuns.id, runId)).returning({ id: campRuns.id, status: campRuns.status, cancelRequestedAt: campRuns.cancelRequestedAt });
     await tx.insert(campEvents).values({ roomId, runId, type: "cancel_requested", content: `A human requested cancellation (${userId}); waiting for worker cleanup` });
     return { room, run: requested };

@@ -2682,6 +2682,13 @@
       "when": 1793438000000,
       "tag": "0382_camp_integration_inspection",
       "breakpoints": true
+    },
+    {
+      "idx": 383,
+      "version": "7",
+      "when": 1793538000000,
+      "tag": "0383_camp_parallel_pair",
+      "breakpoints": true
     }
   ]
 }

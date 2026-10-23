@@ -4,7 +4,7 @@ import { lstat, access } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { loadToolchain, regularBytes, runtimePackage, toolchainLock } from './toolchain.mjs';
-import { parseWorkerDeclaration, CAMP_AGENT_TASK_KINDS, getTaskRequirements, checkWorkerCompatibility } from '../../camp-protocol/src/index.js';
+import { parseWorkerDeclaration, CAMP_AGENT_TASK_KINDS, getTaskRequirements, getPluginTaskRequirements, checkWorkerCompatibility } from '../../camp-protocol/src/index.js';
 import { loadVerificationHarnesses } from './verification.mjs';
 
 const execute = promisify(execFile);
@@ -89,7 +89,7 @@ export async function runLocalChecks({ runtime, env = process.env, sourcePath, p
   else await check('plugin', 'plugin_compatible', 'plugin_invalid', async () => {
     const folder = env.CAMP_DSH_PLUGIN ?? resolve(runtimePackage, '../dsh-plugin');
     const plugin = parseWorkerDeclaration(JSON.parse(await regularBytes(join(folder, 'protocol.json'), 65536)));
-    for (const taskKind of CAMP_AGENT_TASK_KINDS) if (checkWorkerCompatibility(plugin, getTaskRequirements({ protocolVersion, workflow: 'serial', taskKind, inputCandidate: null })).status !== 'compatible') throw new Error('Plugin capability missing');
+    for (const taskKind of CAMP_AGENT_TASK_KINDS) if (checkWorkerCompatibility(plugin, getPluginTaskRequirements(getTaskRequirements({ protocolVersion, workflow: 'serial', taskKind, inputCandidate: null }))).status !== 'compatible') throw new Error('Plugin capability missing');
   });
   await check('harnesses', 'harnesses_verified', 'harnesses_invalid', async () => { await loadVerificationHarnesses(env); return env.CAMP_VERIFICATION_HARNESSES ? 'harnesses_verified' : 'harnesses_not_configured'; });
   if (!sourcePath) add('source', 'passed', 'default_seed');

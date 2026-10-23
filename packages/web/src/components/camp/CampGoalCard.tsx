@@ -3,7 +3,7 @@ import { useIntl } from "react-intl";
 import { ArrowLeft, CheckCircle2, RotateCcw, Square } from "lucide-react";
 import { Button } from "@botiverse/raft-ui";
 import type { CampGoal, CampIntegrationOperation, CampRun, CampTask } from "./campApi";
-import { CampRunResults } from "./CampRunViews";
+import { CampRunExecution, CampRunResults } from "./CampRunViews";
 import { campTaskStatusLabel } from "./campStatus";
 import type { MessageId } from "../../i18n/messages/en";
 import CampSerialPlan from "./CampSerialPlan";
@@ -11,6 +11,8 @@ import CampGoalResult from "./CampGoalResult";
 import CampGoalVerificationView from "./CampGoalVerification";
 import CampGoalVersions from "./CampGoalVersions";
 import CampGoalIntegration from "./CampGoalIntegration";
+import CampExecutionPool from "./CampExecutionPool";
+import { hasSharedBaseline, planModeLabel } from "./campPlanMode";
 
 const REASON_LABELS: Partial<Record<string, MessageId>> = {
   run_failed: "camp.reason.run_failed",
@@ -79,6 +81,7 @@ export default function CampGoalCard({ goal, tasks, runs, busy, onRetry, onCance
   const minutes = (seconds: number) => formatNumber(seconds / 60, { maximumFractionDigits: 1 });
   const hasHistory = runs.some(run => run.artifacts.length > 0 || run.error || run.outcome || run.cleanupState === "unknown");
   const inspectionRequired = goal.integrationInspectionRequired || goal.reason === "integration_inspection_required";
+  const stoppingRuns = currentRuns.filter(run => run.cancelRequestedAt || run.status === "cancelled" || run.cleanupState === "unknown" || (run.status === "running" && ["cancelling", "cancelled", "needs_attention"].includes(goal.status)));
 
   return (
     <article className="flex flex-col gap-4 rounded-xl border border-border-default bg-layer-surface p-4 md:p-5" data-testid={`camp-goal-${goal.id}`}>
@@ -86,7 +89,7 @@ export default function CampGoalCard({ goal, tasks, runs, busy, onRetry, onCance
         <div className="min-w-0 flex-1">
           <h4 className="break-words font-medium">{goal.title}</h4>
           <p className="mt-1 text-xs text-foreground-hint">{t({ id: "camp.goalAttempt" }, { attempt: goal.attempt })}</p>
-          {goal.workflow === "serial" && <p className="mt-1 text-xs text-foreground-hint" data-testid="camp-goal-plan-mode">{t({ id: goal.planMode === "same_baseline_pair" ? "camp.planMode.same_baseline_pair" : "camp.planMode.sequential" })}</p>}
+          {goal.workflow === "serial" && <p className="mt-1 text-xs text-foreground-hint" data-testid="camp-goal-plan-mode">{t({ id: planModeLabel(goal.planMode) })}</p>}
         </div>
         <p className="text-sm font-medium" role="status">{t({ id: `camp.goalStatus.${goal.status}` })}</p>
       </header>
@@ -97,6 +100,8 @@ export default function CampGoalCard({ goal, tasks, runs, busy, onRetry, onCance
         <div><dt className="text-foreground-hint">{t({ id: "camp.timeBudget" })}</dt><dd className="mt-1 font-medium">{t({ id: "camp.minutesUsedLimit" }, { used: minutes(goal.usage.elapsedSeconds), limit: minutes(goal.budget.maxDurationSeconds) })}</dd></div>
       </dl>
       <p className="text-xs text-foreground-hint">{t({ id: "camp.activeRuns" }, { count: goal.activeRuns })}</p>
+      <CampExecutionPool goal={goal} />
+      {goal.planMode === "parallel_pair" && stoppingRuns.length > 0 && <section className="rounded-lg border border-border-default p-4" aria-label={t({ id: "camp.parallel.cleanupTitle" })} data-testid="camp-parallel-cleanup"><h5 className="text-sm font-medium">{t({ id: "camp.parallel.cleanupTitle" })}</h5><p className="mt-2 text-xs text-foreground-hint">{t({ id: "camp.parallel.cleanupHelp" })}</p><div className="mt-3 grid gap-3 sm:grid-cols-2">{stoppingRuns.map(run => <CampRunExecution key={run.id} run={run} pool={goal.executionPool} />)}</div></section>}
       {runs.some(run => run.cleanupState === "unknown") && <p className="text-xs text-foreground-hint">{t({ id: "camp.goalCleanupUnknown" })}</p>}
       {(goal.reason || goal.status === "needs_attention") && (
         <p className="rounded-lg border border-border-default p-3 text-sm text-foreground-secondary" role={goal.status === "needs_attention" ? "alert" : undefined}>
@@ -118,10 +123,10 @@ export default function CampGoalCard({ goal, tasks, runs, busy, onRetry, onCance
         <div className="flex flex-wrap items-center gap-2">
           {goal.canRetry && <Button variant="outline" size="sm" disabled={busy} onClick={retry}><RotateCcw size={13} />{t({ id: "camp.retryGoal" })}</Button>}
           {goal.canCancel && <Button variant="ghost" size="sm" disabled={busy} onClick={cancel}><Square size={12} />{t({ id: "camp.cancelGoal" })}</Button>}
-          {goal.canRetry && <p className="text-xs text-foreground-hint">{t({ id: goal.planMode === "same_baseline_pair" ? "camp.integration.retryGoalHelp" : "camp.retryGoalHelp" })}</p>}
+          {goal.canRetry && <p className="text-xs text-foreground-hint">{t({ id: hasSharedBaseline(goal.planMode) ? "camp.integration.retryGoalHelp" : "camp.retryGoalHelp" })}</p>}
         </div>
       )}
-      {hasHistory && <details className="border-t border-border-default pt-3"><summary className="mb-3 cursor-pointer text-sm">{t({ id: "camp.goalHistory" })}</summary><CampRunResults runs={runs} /></details>}
+      {(hasHistory || (goal.planMode === "parallel_pair" && runs.length > 0)) && <details className="border-t border-border-default pt-3" data-testid="camp-goal-history"><summary className="mb-3 cursor-pointer text-sm">{t({ id: "camp.goalHistory" })}</summary><CampRunResults runs={runs} showExecution={goal.planMode === "parallel_pair"} pool={goal.executionPool} /></details>}
     </article>
   );
 }

@@ -2,7 +2,9 @@
 
 本阶段在单 Room 自主交付之上建立可版本化的执行契约。目标是把不兼容部署挡在任务领取之前，并为后续多个 Worker、sandbox 适配器和滚动升级提供明确边界。它不增加并行任务图或自动合并。
 
-当前版本已推进至 Worker 0.5.0、协议 1/2/3 支持。协议 3 仅用于显式的同基线双候选目标，默认逐项目标继续冻结协议 2，见 [可信集成](./trusted-integration.md)。下文保留协议 1 的设计和升级验收记录；新的串行目标冻结协议 2，需要管理员检查策略、候选 Diff 和独立可信验证，详细变化见 [候选 Diff 与可信验证](./delivery-evidence.md)。协议 1 的既有目标与结果重放继续使用原契约。0.4.0 增加的项目摘要、自报预检和离线回收见 [单机 Worker 部署](./single-host-worker.md)，没有改变执行协议版本。
+当前版本已推进至 Worker 0.6.0、协议 1/2/3/4 支持。默认逐项目标继续冻结协议 2；协议 3 用于依次执行的同基线双候选，见 [可信集成](./trusted-integration.md)；协议 4 仅用于显式的 `parallel_pair`，见 [有界并行执行](./bounded-pair-execution.md)。下文保留协议 1 的设计和升级验收记录。协议 1 的既有目标与结果重放继续使用原契约。
+
+协议 4 领取需要 `bounded-pair.v1` 和精确的 `executionPool` 声明。Room 固定存储域，Goal 固定池、两条 lane 和资源上限；不匹配时零分配、零预算。未启用池的串行 Worker 只声明到版本 3。静态插件检查使用 `getPluginTaskRequirements` 投影模型所需能力，不要求 DSH 插件持有宿主机的资源管理、可信合并或验证能力。
 
 ## 单一协议来源
 
@@ -47,6 +49,8 @@ Worker 先使用 Room 凭据读取 `GET /api/camp/worker/protocol`，检查服�
 ## 恢复与诊断
 
 `state`、`reconcile`、`cleanup` 和原 `complete` 结果重放不增加新的必填协议字段。新协商失败不能重写、丢弃或重新计算原 outbox；执行权失效后的物理清理仍需独立确认。Worker 不把旧 Run 的能力快照当作新的领取授权。
+
+池恢复新增非分配式领取查询：携带原 `workerId`、`claimId`、`runToken` 和 `restoreOnly: true`。已绑定 intent 返回原执行和原协商；未绑定时返回 `{ "run": null, "unbound": true }`，不进行 reconcile、登记或预算修改。两条 lane 完成恢复屏障后才能正常重放未绑定 intent。版本 4 的失效执行在物理清理未确认前继续占用容量，不能通过新 epoch 或新目标绕过。
 
 `camp_workers` 只保存每个 Room/Worker 最近的合法声明、实际任务要求、兼容结果及时间。Room 快照最多返回最近 50 条观测，不暴露令牌、模型密钥或本机路径。界面展示最近一次报告和实际缺项，不把它解释为机器在线探测。没有任务可检查时兼容结果为 null；旧服务端没有 `workers` 字段时保持旧界面。
 

@@ -4,7 +4,7 @@ Camp 把频道变成一个可观察的工作室：人提交目标，协调者提
 
 完整设计、复用清单、接口及验收标准见 [详细设计](./raft-dsh-layerfs.md)。
 
-当前串行交付流程、接口与验收见 [单 Room 自主交付](./serial-room-workflow.md)。目标分组、人工重试历史、执行预算、Worker 崩溃恢复与持久结果补交见 [可靠执行方案](./durable-execution.md)；后续并行任务及可信候选合并见 [工作流设计](./durable-workflows-next.md)。
+当前串行交付流程、接口与验收见 [单 Room 自主交付](./serial-room-workflow.md)。目标分组、人工重试历史、执行预算、Worker 崩溃恢复与持久结果补交见 [可靠执行方案](./durable-execution.md)；有界双事项并行见 [执行池设计](./bounded-pair-execution.md)，后续任意依赖图见 [工作流设计](./durable-workflows-next.md)。
 
 共享类型、校验与工具 Schema、领取前的能力检查及升级恢复边界见 [Worker 协议与能力协商](./worker-protocol.md)。真实旧 Worker 拒绝、兼容 Worker 接手和导出验收可运行 `node scripts/mvp/protocol-real-smoke.mjs --real`；该命令使用已有串行演示 Room，需要先停止其常驻 Worker，避免它抢先领取探针目标。
 
@@ -14,7 +14,10 @@ Camp 把频道变成一个可观察的工作室：人提交目标，协调者提
 
 新增 [同基线双候选可信集成](./trusted-integration.md)：显式选择两个独立事项，依次从同一基线构建、审查，再执行系统集成、独立验证和整体验收；普通逐项模式保持原语义。0.5.0 支持协议 3，仍兼容 1/2。
 
+新增 [双事项有界并行](./bounded-pair-execution.md)：显式 `parallel_pair` 使用协议 4，一个本机 supervisor 管理两条执行通道；两个开发任务共享不可变基线，逐项审查、返工后再合并。0.6.0 的串行 Worker 仍只领取协议 1–3；并行模式必须启动执行池。池声明展示的是配置的总资源上限，不是实时占用。
+
 本轮变更的审查发现、修复约束与升级方式见 [代码审查记录](./code-review.md)。
+双通道的恢复、容量等待、资源观察与版本界面再次审查见 [并行审查记录](./parallel-review.md)。
 
 ## 本机使用
 
@@ -42,6 +45,15 @@ Camp 把频道变成一个可观察的工作室：人提交目标，协调者提
 
 5. 在频道发送 `/camp 目标和验收方式`，也可以在“团队执行”面板提交。普通聊天不会自动创建付费执行任务。停止按钮先请求取消，Worker 停止 DSH 并清理 Sandbox 后才确认终态。
 
+使用并行双事项时，在同一配置和 runtime home 上停止原串行 Worker，再启动本机池；不要同时运行二者：
+
+```sh
+node --env-file=.camp/runtime.env --env-file=.camp/worker.env \
+  --import @oxc-node/core/register packages/camp-runtime/scripts/worker-pool.mjs
+```
+
+资源默认按最多四个容器预留：两条 lane 各一个主沙箱及一个临时辅助容器，总计 8 CPU、8 GiB、1,024 PIDs，另保留主机内存余量。池身份和存储域持久保存在私有 runtime home；不要为绕过失败而替换身份。停止池后再运行独立导出或维护命令。
+
 默认串行目标包含一至五项有序任务，一轮最多 24 次运行、10 次审查、60 分钟总时间，规划、澄清、返工、最终验收和总结全部计入预算。面板可设置本次预算；等待人工回复也受总时间约束。旧固定流程及显式单角色探针保留原来的 12 次运行、3 次审查、30 分钟默认值。
 
 问题需要回复时，打开问题收件箱即可查看接收角色、阻塞原因及回答历史。需要人决策的问题允许有频道发言权限的成员回答；平台保存当前文件候选并释放 Worker，回复后以新执行继续。预算耗尽或业务执行失败时进入“需要处理”，由管理员显式重试，旧一轮的任务、证据、预算和结束原因保留。基础设施中断可以在同一轮预算内重新分配新 epoch。
@@ -50,7 +62,7 @@ Camp 把频道变成一个可观察的工作室：人提交目标，协调者提
 
 本次演示的常驻 Worker 已在 `tmux slock-camp` 的 `camp-worker` 窗口启动，使用 `.camp/worker.env` 连接演示 Room。它与每个 Room 的凭据绑定；其他频道需要对应的 Worker 配置。
 
-最新演示入口和稳定 runtime home 保存在 `.camp/active-demo.json`。常驻 Worker 目前连接真实双候选集成演示 Room，回执为 `.camp/integration-model-latest.json`；此前交付验证仍保存在 `.camp/delivery-latest.json`，原 Room、候选和配置保留，切换前配置备份为忽略文件 `.camp/worker.before-integration.env`。旧升级脚本使用其原回执中的配置，不依赖当前常驻 Worker 的 Room。
+最新演示入口和稳定 runtime home 保存在 `.camp/active-demo.json`。常驻双通道池连接真实并行交付演示 Room，回执为 `.camp/parallel-model-latest.json`；此前双候选、串行交付验证仍保存在 `.camp/integration-model-latest.json`、`.camp/delivery-latest.json`，原 Room、候选和配置保留。切换前配置备份为忽略文件 `.camp/worker.before-parallel.env`。旧升级脚本使用其原回执中的配置，不依赖当前常驻池的 Room。
 
 Worker 需要当前 Linux 主机上的 Docker、LayerFS Native/Daemon 构建、运行镜像和固定版本的 DSH。构建及运行说明见 [Runtime](../../packages/camp-runtime/README.md)，插件契约见 [DSH 插件](../../packages/dsh-plugin/README.md)。本机这些运行依赖已准备；新机器需按说明构建。
 
@@ -63,6 +75,17 @@ node scripts/mvp/serial-real-smoke.mjs --real
 ```
 
 结果保存在忽略目录 `.camp/serial/` 及 `.camp/serial-latest.json`。验证包含独立的搜索和 HTTP 黑盒断言、隔离容器中的导出测试，以及浏览器中的搜索、空结果、错误处理、安全文本渲染和最终 Room 展示。`--prepare-only` 只准备项目，不启动模型。
+
+并行阶段使用独立 Room 和项目验证：
+
+```sh
+# 先停止本机常驻 manager。真实 API/Docker/LayerFS；模拟角色输出，零模型调用。
+node scripts/mvp/parallel-real-smoke.mjs --real-infra
+# 使用 .camp/runtime.env 中的配置调用真实 DSH；会使用模型额度。
+node scripts/mvp/integration-model-smoke.mjs --real-model --parallel
+```
+
+基础设施脚本覆盖双沙箱同时执行、逆序完成后的双亲合并、单 Run 取消整个目标，以及两个真实孤儿沙箱的 SIGKILL 恢复；模型脚本验证独立两事项的真实自主交付。两者默认使用 0.6.0 bundle 和 `packages/camp-runtime/.local/parallel-image.json`，回执分别为 `.camp/parallel-infra-latest.json` 和 `.camp/parallel-model-latest.json`。它们不会替换已有演示结果；执行后按原配置恢复常驻池。
 
 `node scripts/mvp/serial-ui-smoke.mjs` 使用真实浏览器、登录和频道 HTTP，Camp API 使用明确标注的协议夹具，不启动模型或 Sandbox；用于验证人工回答、成果清单下载和继续需求的交互。
 
@@ -96,7 +119,7 @@ node scripts/mvp/goal-ui-smoke.mjs
 
 ## 当前边界与下一步
 
-默认流程是协调者提交有序计划，单开发角色串行执行，每项审查通过后推进；驳回自动返工，最后对原始需求做整体验收并记录协调总结。一个 Room 同时推进一个交付目标。问题通过持久收件箱挂起和恢复，普通进度与房间通知不触发模型唤醒。已启用显式的同基线双候选可信合并；任意依赖图与多个开发执行并行尚未启用。旧固定流程继续兼容；现有 Raft 其他 Runtime 代码保留以支持旧功能，Camp 新执行路径只使用 DSH。
+默认流程是协调者提交有序计划，单开发角色串行执行，每项审查通过后推进；驳回自动返工，最后对原始需求做整体验收并记录协调总结。一个 Room 同时推进一个交付目标。问题通过持久收件箱挂起和恢复，普通进度与房间通知不触发模型唤醒。显式的 `parallel_pair` 允许同一开发角色在两条本机 lane 并发执行两个独立事项，再可信合并；任意依赖图及跨主机 Worker 尚未启用。旧固定流程继续兼容；现有 Raft 其他 Runtime 代码保留以支持旧功能，Camp 新执行路径只使用 DSH。
 
 候选以 `refKind` 和 `refId` 表示不可变 Layer 或 Commit。初始导入没有 Commit，未修改文件的任务可以直接审查、交付原始 Layer；实际修改后产生 Commit。审查、总结和 Room 接受的版本均由服务端绑定，下一目标继承该版本。已完成目标可下载成果清单，并在存储主机用 Runtime 导出到新的外部目录；不会自动回写原项目或发布到 Git 主分支。
 
@@ -115,7 +138,8 @@ LayerFS 当前使用 Disposable Store；只支持同一 Linux 内核、本地存
 | 候选与可信验证 | Layer/Commit 基线 Diff、冻结检查策略、独立验证任务、有界自动返工、历史回执 | 候选测试通过但固定外部验收失败时禁止接受，修复后再验证并完成 |
 | 单机 Worker 部署（本轮完成） | 固定工具链、配置下载、预检、CPU/内存/PID 限制、离线回收 | 真实 SIGKILL 与 API 离线后保留原 outbox、重连补交并完成独立验证和导出；无模型调用 |
 | 可信候选集成（本轮完成） | 同基线双亲、可信三方合并、冲突与未知结局恢复、集成候选复验 | 真实 DSH 两项改动完整保留，原生合并、独立检查与导出完成；未知结局不盲重试 |
-| 并行协作 | 有界依赖图、并发上限、多个 Worker | 下游读取集成候选，日常进度不触发唤醒风暴 |
+| 双事项有界并行 | 两个开发执行、单机池、资源准入、全池恢复屏障 | 两个真实容器同时执行；取消或 SIGKILL 后确认两条 lane 清理；两项成果完整交付 |
+| 后续依赖协作 | 有界依赖图、多个 Worker、存储转移 | 下游读取所有父项的集成候选，日常进度不触发唤醒风暴 |
 | 存储与发布 | 跨主机制品、持久 Store 恢复、显式发布入口 | 掉电恢复独立验证；发布基线与检查候选严格一致 |
 | 开源体验 | 三分钟演示、录屏、架构图、示例任务、贡献指南 | 用户无需了解 Raft 内部概念即可完成一次协作并检查证据 |
 

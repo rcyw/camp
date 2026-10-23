@@ -1,4 +1,4 @@
-import { CampProtocolError, parseCandidate, parseChangeSet, parseIntegrationReport, parsePlanItem, parseVerificationReport, parseWorkerDeclaration, serverProtocol } from "../../../camp-protocol/src/index.js";
+import { CampProtocolError, parseCandidate, parseChangeSet, parseIntegrationReport, parsePlanItem, parseVerificationReport, serverProtocol } from "../../../camp-protocol/src/index.js";
 import { Router, type Router as RouterType, type Request, type Response, type NextFunction } from "express";
 import type { Server as SocketServer } from "socket.io";
 import { z } from "zod";
@@ -35,7 +35,7 @@ const roomInput = z.object({
   roles: z.array(z.object({ role, agentId: id.optional(), instructions: z.string().max(16000).optional() })).length(3).optional(),
 });
 const budgetInput = z.object({ maxRuns: z.number().int().min(1).max(100).optional(), maxReviewRounds: z.number().int().min(1).max(20).optional(), maxDurationSeconds: z.number().int().min(1).max(86400).optional() });
-const pipelineInput = z.object({ title: z.string().trim().min(1).max(500), description: z.string().max(16000).optional(), role: role.optional(), dependsOn: z.array(id).max(100).optional(), budget: budgetInput.optional(), workflow: z.enum(["serial", "legacy"]).optional(), fromGoalId: id.optional(), planMode: z.enum(["sequential", "same_baseline_pair"]).optional() }).strict();
+const pipelineInput = z.object({ title: z.string().trim().min(1).max(500), description: z.string().max(16000).optional(), role: role.optional(), dependsOn: z.array(id).max(100).optional(), budget: budgetInput.optional(), workflow: z.enum(["serial", "legacy"]).optional(), fromGoalId: id.optional(), planMode: z.enum(["sequential", "same_baseline_pair", "parallel_pair"]).optional() }).strict();
 const leaseInput = z.object({ workerId: z.string().trim().min(1).max(200), epoch: z.number().int().positive() });
 const pluginIdentity = { epoch: leaseInput.shape.epoch, workerId: leaseInput.shape.workerId.optional(), runId: id.optional() };
 const eventInput = z.object({ workerId: z.string().max(200).optional(), epoch: z.number().int().positive(), type: z.enum(["progress", "artifact", "question", "handoff"]), content: text, artifact: artifact.optional(), toRole: role.optional() });
@@ -194,8 +194,8 @@ campWorkerRouter.post("/preflight", endpoint(async (req, res) => {
   res.json(observation);
 }));
 campWorkerRouter.post("/claim", endpoint(async (req, res) => {
-  const body = leaseInput.omit({ epoch: true }).extend({ claimId: id.optional(), runToken: z.string().regex(/^camp_run_[A-Za-z0-9_-]{32,128}$/).optional(), protocol: z.unknown().optional() }).strict().refine(value => Boolean(value.claimId) === Boolean(value.runToken), "claimId and runToken must be supplied together").parse(req.body);
-  const claim = await runs.claimRunDetailed(principal(res), body.workerId, body.claimId ? { claimId: body.claimId, runToken: body.runToken! } : undefined, body.protocol === undefined ? undefined : parseWorkerDeclaration(body.protocol));
+  const body = leaseInput.omit({ epoch: true }).extend({ claimId: id.optional(), runToken: z.string().regex(/^camp_run_[A-Za-z0-9_-]{32,128}$/).optional(), protocol: z.unknown().optional(), restoreOnly: z.boolean().optional() }).strict().refine(value => Boolean(value.claimId) === Boolean(value.runToken), "claimId and runToken must be supplied together").refine(value => !value.restoreOnly || Boolean(value.claimId), "restoreOnly requires claimId and runToken").parse(req.body);
+  const claim = await runs.claimRunDetailed(principal(res), body.workerId, body.claimId ? { claimId: body.claimId, runToken: body.runToken! } : undefined, body.protocol as Parameters<typeof runs.claimRunDetailed>[3], body.restoreOnly);
   if (claim.run) await emitState(req, claim.run.roomId);
   else if (claim.compatibility) {
     const io = req.app.get("io") as SocketServer | undefined;

@@ -24,13 +24,16 @@ test('unsupported and undeclared workers cannot receive versioned work', () => {
   assert.equal(checkWorkerCompatibility(null, getTaskRequirements({ protocolVersion: null, workflow: 'legacy', taskKind: 'plan' })).status, 'legacy');
 });
 
-test('legacy selection uses the highest common version and serial work never infers a missing version', () => {
+test('unfrozen legacy selection stays within v1/v2 and serial work never infers a missing version', () => {
   const legacy = getTaskRequirements({ protocolVersion: null, workflow: 'legacy', taskKind: 'plan' });
   const worker = { ...createWorkerDeclaration(), protocolVersions: [1] };
   const result = checkWorkerCompatibility(worker, legacy);
   assert.equal(result.status, 'compatible'); assert.equal(result.protocolVersion, 1);
-  assert.equal(checkWorkerCompatibility(createWorkerDeclaration(), legacy).protocolVersion, 3);
+  assert.equal(checkWorkerCompatibility(createWorkerDeclaration(), legacy).protocolVersion, 2);
   assert.equal(checkWorkerCompatibility({ ...worker, protocolVersions: [99] }, legacy).status, 'incompatible');
+  assert.equal(checkWorkerCompatibility({ ...worker, protocolVersions: [4] }, legacy).code, 'protocol_unsupported');
+  assert.equal(checkWorkerCompatibility({ ...worker, protocolVersions: [1, 2, 3, 4] }, legacy).protocolVersion, 2);
+  assert.equal(checkWorkerCompatibility(createWorkerDeclaration(), { ...legacy, protocolVersion: 3 }).protocolVersion, 3, 'Historical explicit run versions remain readable for recovery');
   assert.equal(checkWorkerCompatibility(createWorkerDeclaration(), { ...requirements, protocolVersion: null }).status, 'incompatible');
   assert.equal(checkWorkerCompatibility(null, { ...legacy, taskKind: 'verification' }).status, 'incompatible');
   assert.equal(checkWorkerCompatibility(createWorkerDeclaration(), { ...legacy, protocolVersion: 2, taskKind: 'verification' }).status, 'incompatible');
@@ -45,14 +48,14 @@ test('missing tools, yield support and storage formats are diagnosed before allo
   assert.deepEqual(result.missingTaskKinds, ['plan']);
   assert.deepEqual(result.missingRefKinds, ['layer']);
   assert.deepEqual(result.missingCapabilities, ['questions.v1', 'checkpoint-yield.v1']);
-  assert.equal(CAMP_CAPABILITIES.length, 10);
+  assert.equal(CAMP_CAPABILITIES.length, 11);
 });
 
 test('a commit-only observer can review a commit but cannot build from a layer', () => {
   const worker = createWorkerDeclaration(); worker.refKinds = ['commit'];
   const commit = { ...candidate, refKind: 'commit', refId: '12' + 'b'.repeat(64) };
-  assert.equal(checkWorkerCompatibility(worker, getTaskRequirements({ workflow: 'serial', taskKind: 'review', inputCandidate: commit })).status, 'compatible');
-  assert.equal(checkWorkerCompatibility(worker, getTaskRequirements({ workflow: 'serial', taskKind: 'build', inputCandidate: commit })).status, 'incompatible');
+  assert.equal(checkWorkerCompatibility(worker, getTaskRequirements({ protocolVersion: 3, workflow: 'serial', taskKind: 'review', inputCandidate: commit })).status, 'compatible');
+  assert.equal(checkWorkerCompatibility(worker, getTaskRequirements({ protocolVersion: 3, workflow: 'serial', taskKind: 'build', inputCandidate: commit })).status, 'incompatible');
   assert.throws(() => getTaskRequirements({ workflow: 'parallel', taskKind: 'build' }), /Unknown/);
 });
 
@@ -60,7 +63,7 @@ test('declarations reject malformed input and never mutate caller-owned arrays',
   const declaration = createWorkerDeclaration();
   for (const patch of [{ protocolVersions: [] }, { protocolVersions: [1, 1] }, { protocolVersions: ['1'] }, { capabilities: ['a', 'a'] }, { capabilities: ['../../credentials'] }, { workerVersion: '' }, { token: 'not-a-protocol-field' }, { taskKinds: Array(33).fill('plan') }]) assert.throws(() => parseWorkerDeclaration({ ...declaration, ...patch }));
   const parsed = parseWorkerDeclaration(declaration); parsed.capabilities.pop();
-  assert.equal(declaration.capabilities.length, 10);
+  assert.equal(declaration.capabilities.length, 11);
   assert.equal(parseServerProtocol(serverProtocol()).schemaVersion, 1);
   for (const patch of [{ schemaVersion: 2 }, { supportedProtocolVersions: [99] }, { token: 'unexpected' }]) assert.throws(() => parseServerProtocol({ ...serverProtocol(), ...patch }));
 });
@@ -103,9 +106,9 @@ test('the same dependency-free module runs in a browser', async () => {
       const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
       try {
         const protocol = await import(url);
-        return { version: protocol.CAMP_PROTOCOL_VERSION, candidate: protocol.parseCandidate(candidate), compatible: protocol.checkWorkerCompatibility(protocol.createWorkerDeclaration(), protocol.getTaskRequirements({ workflow: 'serial', taskKind: 'build', inputCandidate: candidate })).status };
+        return { version: protocol.CAMP_PROTOCOL_VERSION, candidate: protocol.parseCandidate(candidate), compatible: protocol.checkWorkerCompatibility(protocol.createWorkerDeclaration(), protocol.getTaskRequirements({ protocolVersion: 3, workflow: 'serial', taskKind: 'build', inputCandidate: candidate })).status };
       } finally { URL.revokeObjectURL(url); }
     }, { source, candidate });
-    assert.equal(result.version, 3); assert.equal(result.compatible, 'compatible'); assert.equal(result.candidate.layerId, candidate.refId);
+    assert.equal(result.version, 4); assert.equal(result.compatible, 'compatible'); assert.equal(result.candidate.layerId, candidate.refId);
   } finally { await browser.close(); }
 });

@@ -129,7 +129,7 @@ if (process.argv[2] === '--child') {
       if (kind !== 'conflict') {
         const childInput = join(folder, 'child.json'); await writeFile(childInput, JSON.stringify({ runtimeOptions, env, kind }), { mode: 0o600 });
         child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--child', childInput], { stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH, LANG: 'C.UTF-8', CAMP_WORKER_TOKEN: workerToken } });
-        childOwner = superviseOwnedChild(child, { group: false }); child.stderr.resume();
+        childOwner = superviseOwnedChild(child, { group: false, handleSignals: true }); child.stderr.resume();
         staged = await new Promise((resolveReady, reject) => {
           let pending = ''; const timer = setTimeout(() => reject(new Error('Integration worker did not reach the injection boundary')), 180000);
           child.stdout.on('data', bytes => { pending += bytes; const at = pending.indexOf('\n'); if (at >= 0) { clearTimeout(timer); try { resolveReady(JSON.parse(pending.slice(0, at))); } catch (error) { reject(error); } } });

@@ -1,8 +1,8 @@
 /** Pure wire contracts. No Node, browser, database, DSH or sandbox imports. */
-export const CAMP_PROTOCOL_VERSION = 3;
-export const CAMP_SUPPORTED_PROTOCOL_VERSIONS = Object.freeze([1, 2, 3]);
-export const CAMP_WORKER_VERSION = '0.5.0';
-export const CAMP_PLAN_MODES = Object.freeze(/** @type {const} */ (['sequential', 'same_baseline_pair']));
+export const CAMP_PROTOCOL_VERSION = 4;
+export const CAMP_SUPPORTED_PROTOCOL_VERSIONS = Object.freeze([1, 2, 3, 4]);
+export const CAMP_WORKER_VERSION = '0.6.0';
+export const CAMP_PLAN_MODES = Object.freeze(/** @type {const} */ (['sequential', 'same_baseline_pair', 'parallel_pair']));
 export const CAMP_ROLES = Object.freeze(/** @type {const} */ (['planner', 'builder', 'reviewer']));
 export const CAMP_AGENT_TASK_KINDS = Object.freeze(/** @type {const} */ (['plan', 'build', 'review', 'final_review', 'summary', 'clarification']));
 export const CAMP_TASK_KINDS = Object.freeze(/** @type {const} */ ([...CAMP_AGENT_TASK_KINDS, 'verification', 'integration']));
@@ -12,7 +12,8 @@ export const CAMP_CAPABILITIES_V1 = Object.freeze(/** @type {const} */ ([
   'candidate-review.v1', 'finalize.v1', 'checkpoint-yield.v1',
 ]));
 export const CAMP_CAPABILITIES_V2 = Object.freeze(/** @type {const} */ ([...CAMP_CAPABILITIES_V1, 'candidate-diff.v1', 'trusted-verification.v1']));
-export const CAMP_CAPABILITIES = Object.freeze(/** @type {const} */ ([...CAMP_CAPABILITIES_V2, 'trusted-integration.v1']));
+export const CAMP_CAPABILITIES_V3 = Object.freeze(/** @type {const} */ ([...CAMP_CAPABILITIES_V2, 'trusted-integration.v1']));
+export const CAMP_CAPABILITIES = Object.freeze(/** @type {const} */ ([...CAMP_CAPABILITIES_V3, 'bounded-pair.v1']));
 export const CAMP_INTEGRATION_ALGORITHM = 'layerfs-three-way-v1';
 export const CAMP_INTEGRATION_POLICY = 'reject-overlap-v1';
 export const CAMP_INTEGRATION_LIMITS = Object.freeze({ maxConflicts: 100, maxPayloadBytes: 65536 });
@@ -187,13 +188,29 @@ export function parseChangeSet(value) {
   return parsed;
 }
 
+/** A pool names one trusted storage authority and its two fixed execution lanes.
+ * Resource values reserve the whole pool (two main plus two auxiliary containers).
+ * @param {unknown} value @returns {CampExecutionPool} */
+export function parseExecutionPool(value) {
+  const pool = object(value, 'Execution pool'); only(pool, ['poolId', 'storageId', 'maxParallel', 'workerIds', 'resources'], 'Execution pool');
+  if (typeof pool.poolId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(pool.poolId) || typeof pool.storageId !== 'string' || !/^[a-f0-9]{64}$/.test(pool.storageId) || pool.maxParallel !== 2 || !Array.isArray(pool.workerIds) || pool.workerIds.length !== 2 || new Set(pool.workerIds).size !== 2 || pool.workerIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(id))) throw new CampProtocolError('invalid_execution_pool', 'A pool requires exact storage identity and two unique fixed lane IDs');
+  const resources = object(pool.resources, 'Pool resources'); only(resources, ['maxContainers', 'cpuMillis', 'memoryBytes', 'pidsLimit'], 'Pool resources');
+  const cpuMillis = integer(resources.cpuMillis, 'Pool CPU millis', 256000);
+  const memoryBytes = integer(resources.memoryBytes, 'Pool memory bytes', 549755813888);
+  const pidsLimit = integer(resources.pidsLimit, 'Pool PID limit', 32768);
+  if (resources.maxContainers !== 4 || cpuMillis < 500 || memoryBytes < 268435456 || pidsLimit < 64) throw new CampProtocolError('invalid_execution_pool', 'Pool resources must reserve four containers and bounded CPU, memory and PIDs');
+  return { poolId: pool.poolId, storageId: pool.storageId, maxParallel: 2, workerIds: [...pool.workerIds], resources: { maxContainers: 4, cpuMillis, memoryBytes, pidsLimit } };
+}
+/** @param {unknown} value */
+export function serializeExecutionPool(value) { return JSON.stringify(parseExecutionPool(value)); }
+
 /** Unknown offered identifiers grant no authority; this allows a newer worker
  * to offer extra abilities while retaining its implemented v1 abilities.
  * @param {unknown} value @returns {CampWorkerDeclaration} */
 export function parseWorkerDeclaration(value) {
   const record = object(value, 'Worker declaration');
-  only(record, ['protocolVersions', 'workerVersion', 'taskKinds', 'refKinds', 'capabilities', 'harnesses'], 'Worker declaration');
-  return { protocolVersions: versions(record.protocolVersions), workerVersion: text(record.workerVersion, 'workerVersion', 100), taskKinds: identifiers(record.taskKinds, 'taskKinds', 32), refKinds: identifiers(record.refKinds, 'refKinds', 8), capabilities: identifiers(record.capabilities, 'capabilities', 64), ...(record.harnesses === undefined ? {} : { harnesses: parseHarnesses(record.harnesses) }) };
+  only(record, ['protocolVersions', 'workerVersion', 'taskKinds', 'refKinds', 'capabilities', 'harnesses', 'executionPool'], 'Worker declaration');
+  return { protocolVersions: versions(record.protocolVersions), workerVersion: text(record.workerVersion, 'workerVersion', 100), taskKinds: identifiers(record.taskKinds, 'taskKinds', 32), refKinds: identifiers(record.refKinds, 'refKinds', 8), capabilities: identifiers(record.capabilities, 'capabilities', 64), ...(record.harnesses === undefined ? {} : { harnesses: parseHarnesses(record.harnesses) }), ...(record.executionPool === undefined ? {} : { executionPool: parseExecutionPool(record.executionPool) }) };
 }
 /** @param {string} [workerVersion] @returns {CampWorkerDeclaration} */
 export function createWorkerDeclaration(workerVersion = CAMP_WORKER_VERSION) {
@@ -226,20 +243,32 @@ export function getTaskRequirements(input) {
   const refKinds = !input.inputCandidate || ['build', 'integration'].includes(input.taskKind) ? [...CAMP_REF_KINDS] : [input.inputCandidate.refKind];
   const trusted = input.taskKind === 'verification';
   const capabilities = input.taskKind === 'integration' ? ['layerfs.candidate.v1', 'candidate-diff.v1', 'trusted-integration.v1'] : trusted ? ['layerfs.candidate.v1', 'candidate-diff.v1', 'trusted-verification.v1'] : serial ? [...CAMP_CAPABILITIES_V1, ...(protocolVersion !== null && protocolVersion >= 2 ? ['candidate-diff.v1'] : [])] : ['dsh.acp.v1', 'layerfs.candidate.v1', 'candidate-review.v1'];
+  if (protocolVersion !== null && protocolVersion >= 4) capabilities.push('bounded-pair.v1');
   const harnesses = trusted ? input.verificationPolicy?.policy.checks.flatMap(check => check.harness ? [check.harness] : []) ?? [] : [];
-  return { protocolVersion, workflow: input.workflow, taskKind: input.taskKind, refKinds, capabilities, ...(protocolVersion !== null && protocolVersion >= 2 ? { harnesses: parseHarnesses(harnesses, true) } : {}) };
+  return { protocolVersion, workflow: input.workflow, taskKind: input.taskKind, refKinds, capabilities, ...(protocolVersion !== null && protocolVersion >= 2 ? { harnesses: parseHarnesses(harnesses, true) } : {}), ...(protocolVersion !== null && protocolVersion >= 4 ? { executionPoolRequired: true } : {}) };
+}
+/** Plugins execute model tools, never host pool admission or system operations.
+ * @param {CampTaskRequirements} requirements @returns {CampTaskRequirements} */
+export function getPluginTaskRequirements(requirements) {
+  if (!CAMP_AGENT_TASK_KINDS.includes(/** @type {any} */ (requirements.taskKind))) throw new CampProtocolError('protocol_unsupported', 'A plugin cannot execute system operations', 409);
+  const { executionPoolRequired: _pool, ...model } = requirements;
+  return { ...model, capabilities: requirements.capabilities.filter(value => value !== 'bounded-pair.v1') };
 }
 /** Pure check: neither this function nor offered capability names can assign work.
  * @param {CampWorkerDeclaration|null|undefined} declaration @param {CampTaskRequirements} requirements @returns {CampWorkerCompatibility} */
 export function checkWorkerCompatibility(declaration, requirements) {
   const offered = declaration ? parseWorkerDeclaration(declaration) : null;
-  const common = offered?.protocolVersions.filter(version => CAMP_SUPPORTED_PROTOCOL_VERSIONS.includes(version)) ?? [];
+  // An unfrozen legacy goal has only the v1/v2 execution contract. Newer
+  // serial versions require capabilities and pool authority absent from it.
+  // Explicit historical run versions remain eligible for exact recovery.
+  const common = offered?.protocolVersions.filter(version => CAMP_SUPPORTED_PROTOCOL_VERSIONS.includes(version) && (requirements.workflow !== 'legacy' || requirements.protocolVersion !== null || version <= 2)) ?? [];
   const protocolVersion = requirements.protocolVersion ?? (requirements.workflow === 'legacy' && common.length ? Math.max(...common) : null);
   const base = { protocolVersion, missingTaskKinds: /** @type {string[]} */ ([]), missingRefKinds: /** @type {string[]} */ ([]), missingCapabilities: /** @type {string[]} */ ([]), ...(protocolVersion !== null && protocolVersion >= 2 ? { missingHarnesses: /** @type {string[]} */ ([]) } : {}) };
   if (!offered) return requirements.workflow === 'legacy' && requirements.protocolVersion === null && !['verification', 'integration'].includes(requirements.taskKind)
     ? { ...base, status: 'legacy', code: 'legacy_unversioned' }
     : { ...base, status: 'incompatible', code: 'protocol_required' };
   if (protocolVersion === null || !CAMP_SUPPORTED_PROTOCOL_VERSIONS.includes(protocolVersion) || !offered.protocolVersions.includes(protocolVersion) || !['serial', 'legacy'].includes(requirements.workflow) || !CAMP_TASK_KINDS.includes(requirements.taskKind) || (requirements.taskKind === 'verification' && (requirements.workflow !== 'serial' || protocolVersion < 2)) || (requirements.taskKind === 'integration' && (requirements.workflow !== 'serial' || protocolVersion < 3))) return { ...base, status: 'incompatible', code: 'protocol_unsupported' };
+  if (requirements.executionPoolRequired && !offered.executionPool) return { ...base, status: 'incompatible', code: 'pool_required' };
   const missingTaskKinds = offered.taskKinds.includes(requirements.taskKind) ? [] : [requirements.taskKind];
   const missingRefKinds = requirements.refKinds.filter(kind => !offered.refKinds.includes(kind));
   const missingCapabilities = requirements.capabilities.filter(capability => !offered.capabilities.includes(capability));
@@ -265,7 +294,7 @@ export function parseCandidate(value, options = {}) {
 }
 /** @param {unknown} value @returns {CampPlanMode} */
 export function parsePlanMode(value) {
-  if (!CAMP_PLAN_MODES.includes(/** @type {any} */ (value))) throw new CampProtocolError('invalid_plan_mode', 'Choose sequential or same_baseline_pair');
+  if (!CAMP_PLAN_MODES.includes(/** @type {any} */ (value))) throw new CampProtocolError('invalid_plan_mode', 'Choose sequential, same_baseline_pair or parallel_pair');
   return /** @type {CampPlanMode} */ (value);
 }
 /** Frozen integration authority. Parent order is plan order, not finish time.
@@ -396,10 +425,10 @@ export const CAMP_TOOL_SCHEMAS = Object.freeze({
 /** @typedef {CampPlanItem & {index:number,status:'pending'|'building'|'reviewing'|'approved'|'needs_attention',reworkCount:number,candidate:CampCandidate|null,reviews:CampReviewRecord[]}} CampWorkItem */
 /** @typedef {{id:string,goalId:string,goalAttempt:number,taskId:string,originRunId:string|null,fromRole:CampRole,toRole:CampRole|null,needsHuman:boolean,status:CampQuestionStatus,content:string,answer:string|null,answerByRole:string|null,canAnswer:boolean,createdAt:string,answeredAt:string|null}} CampQuestion */
 /** @typedef {{schemaVersion:1,roomId:string,goalId:string,goalAttempt?:number,workflow?:CampWorkflow,planMode?:CampPlanMode,status:CampGoalStatus,resultReady:boolean,candidate:CampCandidate|null,summary:string|null,evidence:string|null,remaining:string[],metrics:CampMetrics,verification?:{policy:CampVerificationPolicySnapshot|null,receipt:CampVerificationReceipt|null}|null,integration?:{input:CampIntegrationInput,receipt:CampIntegrationReceipt|null}|null}} CampResultManifest */
-/** @typedef {{protocolVersions:number[],workerVersion:string,taskKinds:string[],refKinds:string[],capabilities:string[],harnesses?:CampHarnessIdentity[]}} CampWorkerDeclaration */
+/** @typedef {{protocolVersions:number[],workerVersion:string,taskKinds:string[],refKinds:string[],capabilities:string[],harnesses?:CampHarnessIdentity[],executionPool?:CampExecutionPool}} CampWorkerDeclaration */
 /** @typedef {{schemaVersion:1,supportedProtocolVersions:number[],capabilities:string[],taskKinds:string[],refKinds:string[]}} CampServerProtocol */
-/** @typedef {{protocolVersion:number|null,workflow:CampWorkflow,taskKind:CampTaskKind,refKinds:string[],capabilities:string[],harnesses?:CampHarnessIdentity[]}} CampTaskRequirements */
-/** @typedef {{status:'compatible'|'incompatible'|'legacy',code:'compatible'|'legacy_unversioned'|'protocol_required'|'protocol_unsupported'|'capability_missing',protocolVersion:number|null,missingTaskKinds:string[],missingRefKinds:string[],missingCapabilities:string[],missingHarnesses?:string[]}} CampWorkerCompatibility */
+/** @typedef {{protocolVersion:number|null,workflow:CampWorkflow,taskKind:CampTaskKind,refKinds:string[],capabilities:string[],harnesses?:CampHarnessIdentity[],executionPoolRequired?:boolean}} CampTaskRequirements */
+/** @typedef {{status:'compatible'|'incompatible'|'legacy',code:'compatible'|'legacy_unversioned'|'protocol_required'|'protocol_unsupported'|'capability_missing'|'pool_required'|'pool_mismatch'|'storage_mismatch'|'lane_not_registered',protocolVersion:number|null,missingTaskKinds:string[],missingRefKinds:string[],missingCapabilities:string[],missingHarnesses?:string[]}} CampWorkerCompatibility */
 /** @typedef {{version:number,declaration:CampWorkerDeclaration,requirements:CampTaskRequirements}} CampNegotiatedProtocol */
 /** @typedef {{id:string,sha256:string}} CampHarnessIdentity */
 /** @typedef {{id:string,label:string,argv:string[],timeoutMs:number,harness?:CampHarnessIdentity}} CampVerificationCheck */
@@ -420,3 +449,7 @@ export const CAMP_TOOL_SCHEMAS = Object.freeze({
 /** @typedef {typeof CAMP_PREFLIGHT_CHECK_IDS[number]} CampPreflightCheckId */
 /** @typedef {{id:CampPreflightCheckId,status:'passed'|'failed'|'skipped',code:string}} CampPreflightCheck */
 /** @typedef {{schemaVersion:1,workerVersion:string,mode:'agent'|'verification',modelConfigured:boolean,toolchainDigest:string|null,imageId:string|null,checks:CampPreflightCheck[]}} CampPreflightReport */
+
+/** @typedef {{poolId:string,storageId:string,maxParallel:2,workerIds:[string,string]|string[],resources:{maxContainers:4,cpuMillis:number,memoryBytes:number,pidsLimit:number}}} CampExecutionPool */
+
+/** @typedef {{status:'waiting',reason:'lane_busy'|'room_capacity'|'role_busy'|'cleanup_pending'|'system_operation_busy'}} CampClaimAdmission */

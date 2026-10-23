@@ -2,6 +2,43 @@ import { createHash } from 'node:crypto';
 import { settleCompletion } from './worker-core.mjs';
 import { integrationCompletion } from './integration-completion.mjs';
 import { recoverTrustedIntegration } from './integration.mjs';
+import { checkedClaim } from './worker-core.mjs';
+import { runTokenForClaim } from './durable-state.mjs';
+import { parseServerProtocol } from '../../camp-protocol/src/index.js';
+
+/** Resolve an old intent without allocating anything. A bound claim is first
+ * written under its original identity, then ordinary recovery may settle it. */
+export async function restorePendingClaim({ journal, runtime, request, workerToken }) {
+  const claimId = await journal.pendingClaim();
+  if (!claimId) return;
+  // Old servers can silently ignore an unknown request field. Discovery must
+  // positively establish the v4 non-allocating contract before sending it.
+  let server;
+  try { server = parseServerProtocol(await request('/protocol')); }
+  catch (error) {
+    if (error.code === 'camp_api_transport' || error.status >= 500 || [401, 403, 408, 429].includes(error.status)) throw error;
+    throw Object.assign(new Error('Pending claim restoration requires a server with the explicit non-allocating v4 contract'), { code: 'camp_restore_unsupported', status: 426 });
+  }
+  if (!server.supportedProtocolVersions.includes(4)) throw Object.assign(new Error('Pending claim restoration requires a server with the explicit non-allocating v4 contract'), { code: 'camp_restore_unsupported', status: 426 });
+  const value = await request('/claim', { workerId: journal.workerId, claimId, runToken: runTokenForClaim(workerToken, claimId), restoreOnly: true });
+  if (value.run) {
+    const claim = checkedClaim(value);
+    const previous = (await journal.list()).find(record => record.runId === claim.id && record.epoch === claim.epoch);
+    if (!previous) await journal.recordClaim(claim, { claimId, runtime: runtime.runIdentity(`${claim.id}-e${claim.epoch}`) });
+    await journal.finishClaim();
+  } else if (value.closed === true) await journal.finishClaim();
+  else if (value.unbound !== true) throw Object.assign(new Error('Server did not confirm a non-allocating claim recovery'), { code: 'protocol_required', status: 426 });
+}
+
+/** Unsupported intent recovery must not block an already recorded exact
+ * outbox, nor discover a bound-but-unrecorded intent through another route. */
+export async function restoreWorkerForClaims(options) {
+  try { await restorePendingClaim(options); }
+  catch (error) {
+    if (error.code === 'camp_restore_unsupported') await recoverWorker({ ...options, discoverRuns: false });
+    throw error;
+  }
+}
 
 export const terminalPhases = new Set(['settled', 'fenced']);
 const terminalStatuses = new Set(['completed', 'failed', 'cancelled', 'suspended']);
@@ -68,8 +105,8 @@ export async function acknowledgeCleanup({ journal, record, request, state, log 
 }
 
 /** Only this worker's recorded attempts are eligible; active foreign owners survive. */
-export async function recoverWorker({ journal, runtime, request, log = () => {}, inspectIntegration = recoverTrustedIntegration }) {
-  const snapshot = await request(`/reconcile?workerId=${encodeURIComponent(journal.workerId)}`);
+export async function recoverWorker({ journal, runtime, request, log = () => {}, inspectIntegration = recoverTrustedIntegration, discoverRuns = true }) {
+  const snapshot = discoverRuns ? await request(`/reconcile?workerId=${encodeURIComponent(journal.workerId)}`) : { runs: [] };
   if (!Array.isArray(snapshot.runs)) throw new Error('Camp reconcile returned invalid state');
   let records = await journal.list();
   for (const state of snapshot.runs) {

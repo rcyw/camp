@@ -9,6 +9,12 @@ export function serializeVerificationPolicy(value: unknown): string;
 export function parseVerificationReport(value: unknown): CampVerificationReport;
 /** @param {unknown} value @returns {CampChangeSet} */
 export function parseChangeSet(value: unknown): CampChangeSet;
+/** A pool names one trusted storage authority and its two fixed execution lanes.
+ * Resource values reserve the whole pool (two main plus two auxiliary containers).
+ * @param {unknown} value @returns {CampExecutionPool} */
+export function parseExecutionPool(value: unknown): CampExecutionPool;
+/** @param {unknown} value */
+export function serializeExecutionPool(value: unknown): string;
 /** Unknown offered identifiers grant no authority; this allows a newer worker
  * to offer extra abilities while retaining its implemented v1 abilities.
  * @param {unknown} value @returns {CampWorkerDeclaration} */
@@ -30,6 +36,9 @@ export function getTaskRequirements(input: {
     inputCandidate?: CampCandidate | null;
     verificationPolicy?: CampVerificationPolicySnapshot | null;
 }): CampTaskRequirements;
+/** Plugins execute model tools, never host pool admission or system operations.
+ * @param {CampTaskRequirements} requirements @returns {CampTaskRequirements} */
+export function getPluginTaskRequirements(requirements: CampTaskRequirements): CampTaskRequirements;
 /** Pure check: neither this function nor offered capability names can assign work.
  * @param {CampWorkerDeclaration|null|undefined} declaration @param {CampTaskRequirements} requirements @returns {CampWorkerCompatibility} */
 export function checkWorkerCompatibility(declaration: CampWorkerDeclaration | null | undefined, requirements: CampTaskRequirements): CampWorkerCompatibility;
@@ -69,17 +78,18 @@ export function parsePlan(value: unknown): CampPlan;
  * @param {unknown} value @returns {CampPreflightReport} */
 export function parsePreflightReport(value: unknown): CampPreflightReport;
 /** Pure wire contracts. No Node, browser, database, DSH or sandbox imports. */
-export const CAMP_PROTOCOL_VERSION: 3;
+export const CAMP_PROTOCOL_VERSION: 4;
 export const CAMP_SUPPORTED_PROTOCOL_VERSIONS: readonly number[];
-export const CAMP_WORKER_VERSION: "0.5.0";
-export const CAMP_PLAN_MODES: readonly ["sequential", "same_baseline_pair"];
+export const CAMP_WORKER_VERSION: "0.6.0";
+export const CAMP_PLAN_MODES: readonly ["sequential", "same_baseline_pair", "parallel_pair"];
 export const CAMP_ROLES: readonly ["planner", "builder", "reviewer"];
 export const CAMP_AGENT_TASK_KINDS: readonly ["plan", "build", "review", "final_review", "summary", "clarification"];
 export const CAMP_TASK_KINDS: readonly ["plan", "build", "review", "final_review", "summary", "clarification", "verification", "integration"];
 export const CAMP_REF_KINDS: readonly ["layer", "commit"];
 export const CAMP_CAPABILITIES_V1: readonly ["dsh.acp.v1", "layerfs.candidate.v1", "structured-plan.v1", "questions.v1", "candidate-review.v1", "finalize.v1", "checkpoint-yield.v1"];
 export const CAMP_CAPABILITIES_V2: readonly ["dsh.acp.v1", "layerfs.candidate.v1", "structured-plan.v1", "questions.v1", "candidate-review.v1", "finalize.v1", "checkpoint-yield.v1", "candidate-diff.v1", "trusted-verification.v1"];
-export const CAMP_CAPABILITIES: readonly ["dsh.acp.v1", "layerfs.candidate.v1", "structured-plan.v1", "questions.v1", "candidate-review.v1", "finalize.v1", "checkpoint-yield.v1", "candidate-diff.v1", "trusted-verification.v1", "trusted-integration.v1"];
+export const CAMP_CAPABILITIES_V3: readonly ["dsh.acp.v1", "layerfs.candidate.v1", "structured-plan.v1", "questions.v1", "candidate-review.v1", "finalize.v1", "checkpoint-yield.v1", "candidate-diff.v1", "trusted-verification.v1", "trusted-integration.v1"];
+export const CAMP_CAPABILITIES: readonly ["dsh.acp.v1", "layerfs.candidate.v1", "structured-plan.v1", "questions.v1", "candidate-review.v1", "finalize.v1", "checkpoint-yield.v1", "candidate-diff.v1", "trusted-verification.v1", "trusted-integration.v1", "bounded-pair.v1"];
 export const CAMP_INTEGRATION_ALGORITHM: "layerfs-three-way-v1";
 export const CAMP_INTEGRATION_POLICY: "reject-overlap-v1";
 export const CAMP_INTEGRATION_LIMITS: Readonly<{
@@ -331,6 +341,7 @@ export type CampWorkerDeclaration = {
     refKinds: string[];
     capabilities: string[];
     harnesses?: CampHarnessIdentity[];
+    executionPool?: CampExecutionPool;
 };
 export type CampServerProtocol = {
     schemaVersion: 1;
@@ -346,10 +357,11 @@ export type CampTaskRequirements = {
     refKinds: string[];
     capabilities: string[];
     harnesses?: CampHarnessIdentity[];
+    executionPoolRequired?: boolean;
 };
 export type CampWorkerCompatibility = {
     status: "compatible" | "incompatible" | "legacy";
-    code: "compatible" | "legacy_unversioned" | "protocol_required" | "protocol_unsupported" | "capability_missing";
+    code: "compatible" | "legacy_unversioned" | "protocol_required" | "protocol_unsupported" | "capability_missing" | "pool_required" | "pool_mismatch" | "storage_mismatch" | "lane_not_registered";
     protocolVersion: number | null;
     missingTaskKinds: string[];
     missingRefKinds: string[];
@@ -493,4 +505,20 @@ export type CampPreflightReport = {
     toolchainDigest: string | null;
     imageId: string | null;
     checks: CampPreflightCheck[];
+};
+export type CampExecutionPool = {
+    poolId: string;
+    storageId: string;
+    maxParallel: 2;
+    workerIds: [string, string] | string[];
+    resources: {
+        maxContainers: 4;
+        cpuMillis: number;
+        memoryBytes: number;
+        pidsLimit: number;
+    };
+};
+export type CampClaimAdmission = {
+    status: "waiting";
+    reason: "lane_busy" | "room_capacity" | "role_busy" | "cleanup_pending" | "system_operation_busy";
 };

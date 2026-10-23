@@ -1,6 +1,6 @@
 # Camp DSH role plugin
 
-This original Cordis bundle gives one leased Camp role scoped collaboration tools. Version `0.5.0` supports agent runs using Camp protocol `1`, `2` or `3`. Its declaration includes only model task kinds; roleless verification and integration belong to the trusted Worker. It uses the server's short-lived run credential. The supervisor alone claims tasks, renews leases, accepts final completion, and provisions roles. Handoff records a suggestion; it does not transfer ownership. The reviewer records a structured `review` artifact with explicit `approved` or `changes_requested`, summary, and evidence; the supervisor must use that value rather than guessing a verdict from prose.
+This original Cordis bundle gives one leased Camp role scoped collaboration tools. Version `0.6.0` supports agent runs using Camp protocol `1`, `2`, `3` or `4`. Its declaration includes only model task kinds; roleless verification and integration belong to the trusted Worker. It uses the server's short-lived run credential. The supervisor alone claims tasks, renews leases, accepts final completion, and provisions roles. Handoff records a suggestion; it does not transfer ownership. The reviewer records a structured `review` artifact with explicit `approved` or `changes_requested`, summary, and evidence; the supervisor must use that value rather than guessing a verdict from prose.
 
 | Tools | Purpose |
 | --- | --- |
@@ -37,7 +37,7 @@ DSH_HOME=/home/agent/.dsh node /opt/camp-dsh/node_modules/@deepseek-ai/dsh/lib/b
 
 The assembler uses already-installed official packages and normal DSH profile/bundle loading. It performs no network requests and runs no agent. The sandbox user must own `DSH_HOME`; keep it across container replacement when native session resume is required.
 
-The worker injects `CAMP_API_URL` (server origin reachable inside the sandbox), `CAMP_RUN_TOKEN`, `CAMP_RUN_ID`, `CAMP_RUN_EPOCH`, `CAMP_WORKER_ID`, `CAMP_ROOM_ID` and the selected `CAMP_PROTOCOL_VERSION` (`1`, `2` or `3`). Never inject `CAMP_WORKER_TOKEN`. Set the model provider credential through the separately configured DSH credential source. An expired run capability or unsupported protocol fails without retrying a mutation.
+The worker injects `CAMP_API_URL` (server origin reachable inside the sandbox), `CAMP_RUN_TOKEN`, `CAMP_RUN_ID`, `CAMP_RUN_EPOCH`, `CAMP_WORKER_ID`, `CAMP_ROOM_ID` and the selected `CAMP_PROTOCOL_VERSION` (`1`, `2`, `3` or `4`). Never inject `CAMP_WORKER_TOKEN`. Set the model provider credential through the separately configured DSH credential source. An expired run capability or unsupported protocol fails without retrying a mutation.
 
 `packages/camp-protocol` defines the model-facing tool schemas and plan validation. The static `protocol.json` declares this bundle's implemented capabilities; the supervisor reads it from the actual configured plugin directory before claiming work. This check executes no selected plugin JavaScript on the host. Regenerate the declaration with `node packages/dsh-plugin/scripts/protocol-descriptor.mjs`, and verify it with the same command plus `--check`. Offline profile assembly also checks that declaration against its source. Compatibility declarations detect stale or incomplete deployments; they do not replace sandbox isolation or server authorization.
 

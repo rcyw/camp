@@ -21,11 +21,13 @@ bounded automatic repair before a result can be accepted.
 The [trusted integration guide](docs/mvp/trusted-integration.md) adds two reviewed
 candidates from a shared baseline, conservative native merging, exact evidence
 and recovery before checks and whole-goal acceptance.
+The [bounded pair guide](docs/mvp/bounded-pair-execution.md) adds two concurrent
+builder attempts on one host, pool admission and recovery of both execution lanes.
 The [single-host worker guide](docs/mvp/single-host-worker.md) covers pinned toolchain
 bundles, connection diagnostics, resource bounds and offline cleanup/recovery.
 The [durable execution design](docs/mvp/durable-execution.md) covers goal budgets,
-worker recovery and result outboxes; [parallel workflow design](docs/mvp/durable-workflows-next.md)
-defines future bounded concurrency and dependency graphs.
+worker recovery and result outboxes; [future dependency plans](docs/mvp/durable-workflows-next.md)
+describe the separate graph scheduling stage.
 
 Camp is an independently maintained fork of
 [Raft](https://github.com/botiverse/raft-source). Development and customizations
@@ -40,6 +42,7 @@ channels, threads, direct messages and tasks alongside people.
 - Submit a goal with `/camp` and observe ordered tasks, review and automatic rework.
 - Resolve questions in the room and continue from the accepted result.
 - Inspect candidate file changes, two-parent integration and independent verification receipts.
+- Run two independent items concurrently with one bounded local Worker pool.
 - Connect a worker with a downloadable configuration and checks before allocation.
 - Recover owned sandboxes and exact result outboxes after a worker crash.
 - Keep task ownership, model execution and sandbox lifecycle explicit.

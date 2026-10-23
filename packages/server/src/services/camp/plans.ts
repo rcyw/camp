@@ -36,7 +36,7 @@ export async function submitPlan(principal: CampPrincipal, runId: string, input:
     const { room, run, binding, goal } = await currentRunScope(tx, principal, runId, input.epoch, input);
     if (binding.kind !== "plan" || run.role !== "planner") throw new CampError(403, "plan_task_required", "Only the current plan task can submit an ordered plan");
     const plan = planBody(input), hash = bodyHash(plan);
-    if (goal.planMode === "same_baseline_pair" && plan.tasks.length !== 2) throw new CampError(400, "pair_plan_required", "A same-baseline pair requires exactly two independent plan items");
+    if (["same_baseline_pair", "parallel_pair"].includes(goal.planMode) && plan.tasks.length !== 2) throw new CampError(400, "pair_plan_required", "A same-baseline pair requires exactly two independent plan items");
     const [existing] = await tx.select().from(campPlans).where(and(eq(campPlans.goalId, goal.id), eq(campPlans.goalAttempt, goal.attempt)));
     if (existing) {
       if (existing.bodyHash !== hash) throw new CampError(409, "plan_conflict", "This attempt already has a different immutable plan");

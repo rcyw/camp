@@ -1,3 +1,4 @@
+import { roomOccupancy } from "./executionPool";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import { getDb } from "../../db/index";
 import { campGoals, campPlans, campQuestions, campRuns, campTasks, tasks } from "../../db/schema";
@@ -18,6 +19,7 @@ export async function goalDeliverySnapshot(goal: Goal, canPost: boolean) {
     const clarification = question.clarificationTaskId ? bindings.find(binding => binding.taskId === question.clarificationTaskId) : null;
     return { ...question, canAnswer: canPost && ["queued", "running", "waiting_question"].includes(goal.status) && question.status === "awaiting_human" && (!clarification || clarification.status === "completed") };
   });
+  const occupied = await roomOccupancy(db, goal.roomId);
   const items = (plan?.items ?? []).map((item, index) => {
     const stages = bindings.filter(binding => binding.planItemKey === item.key);
     const latest = stages[stages.length - 1];
@@ -30,7 +32,9 @@ export async function goalDeliverySnapshot(goal: Goal, canPost: boolean) {
     const status = !latest ? "pending" : ["failed", "blocked", "cancelled"].includes(latest.status) ? "needs_attention"
       : latest.kind === "review" && latest.status === "completed" && latestReview?.outcome === "approved" ? "approved"
         : latest.kind === "review" ? "reviewing" : "building";
-    return { ...item, index, status, role: "builder", reworkCount: Math.max(0, stages.filter(binding => binding.kind === "build").length - 1), candidate: latestRun?.inputCandidate && latest.kind === "review" ? latestRun.inputCandidate : latestRun?.candidate ?? latest?.inputCandidate ?? null, reviews };
+    const schedulingState = status === "approved" ? "approved" : !latest ? "pending" : latest.status === "waiting_question" ? "waiting_question" : ["blocked", "failed", "cancelled"].includes(latest.status) ? "blocked" : latest.status === "running" ? "running" : latest.status === "queued" && occupied.length >= (goal.planMode === "parallel_pair" ? 2 : 1) ? "waiting_capacity" : latest.kind === "review" && latest.status === "queued" ? "waiting_review" : latest.status === "queued" ? "ready" : "pending";
+    const scheduling = { state: schedulingState, reason: schedulingState === "waiting_capacity" ? occupied.some(run => run.status !== "running") ? "cleanup_pending" : "room_capacity" : schedulingState === "waiting_review" ? "reviewer_queue" : schedulingState === "waiting_question" ? "question_pending" : schedulingState === "blocked" ? goal.reason : null };
+    return { ...item, index, status, scheduling, role: "builder", reworkCount: Math.max(0, stages.filter(binding => binding.kind === "build").length - 1), candidate: latestRun?.inputCandidate && latest.kind === "review" ? latestRun.inputCandidate : latestRun?.candidate ?? latest?.inputCandidate ?? null, reviews };
   });
   const elapsedSeconds = goal.startedAt ? Math.max(0, Math.floor(((goal.completedAt?.getTime() ?? Date.now()) - goal.startedAt.getTime()) / 1000)) : 0;
   const humanAnswers = questions.filter(question => question.answer !== null && (question.answerByUserId !== null || question.answerByRole === "human")).length;

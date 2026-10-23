@@ -84,8 +84,8 @@ export default function CampRoomPanel({ channel }: { channel: Channel }) {
   }, [busy, act, channel.id, channel.name, projectName, repoPath]);
   const submit = useCallback(async (description: string, budget: CampBudget, planMode: CampPlanMode) => {
     if (busy || !snapshot || snapshot.canSubmit === false || snapshot.roomBusy || snapshot.room.verificationPolicy === null || (fromGoal && snapshot.room.acceptedHead?.goalId !== fromGoal.id)) return false;
-    if (planMode === "same_baseline_pair" && !snapshot.supportedPlanModes?.includes(planMode)) return false;
-    const accepted = await act(() => campApi.submit(snapshot.room.id, description.split("\n")[0].slice(0, 160), description, budget, fromGoal?.id, planMode === "same_baseline_pair" ? planMode : undefined));
+    if (planMode !== "sequential" && !snapshot.supportedPlanModes?.includes(planMode)) return false;
+    const accepted = await act(() => campApi.submit(snapshot.room.id, description.split("\n")[0].slice(0, 160), description, budget, fromGoal?.id, planMode !== "sequential" ? planMode : undefined));
     if (accepted) setFromGoal(null);
     return accepted;
   }, [busy, snapshot, act, fromGoal]);
@@ -165,7 +165,7 @@ export default function CampRoomPanel({ channel }: { channel: Channel }) {
           <>
             {snapshot.setup && <CampRoomSetup key={snapshot.room.id} snapshot={snapshot} canManage={canManage} onChanged={refresh} />}
             <div className="grid gap-3 sm:grid-cols-3">
-              {CAMP_ROLES.map(role => <CampRoleCard key={role} role={role} runs={snapshot.runs} canCancel={canManage} busy={busy} onCancel={cancel} />)}
+              {CAMP_ROLES.map(role => <CampRoleCard key={role} role={role} runs={snapshot.runs} goals={snapshot.goals} canCancel={canManage} busy={busy} onCancel={cancel} />)}
             </div>
             <CampWorkerDiagnostics workers={snapshot.workers} />
             {!snapshot.setup && snapshot.room.verificationPolicy !== undefined && <CampVerificationPolicyConfig roomId={snapshot.room.id} current={snapshot.room.verificationPolicy} canManage={canManage} onSaved={refresh} />}
@@ -205,7 +205,7 @@ export default function CampRoomPanel({ channel }: { channel: Channel }) {
                 ))}
               </ol>
             </section>
-            {canManage && !snapshot.setup && <CampWorkerConnection key={snapshot.room.id} roomId={snapshot.room.id} />}
+            {canManage && !snapshot.setup && <CampWorkerConnection key={snapshot.room.id} roomId={snapshot.room.id} supportsParallel={snapshot.supportedPlanModes?.includes("parallel_pair")} />}
           </>
         )}
       </div>

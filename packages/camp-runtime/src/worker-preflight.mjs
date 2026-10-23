@@ -42,7 +42,7 @@ export function workerApiRequest(env = process.env) {
 
 /** Reads local prerequisites and the room configuration without allocating a
  * run. Reporting is an explicit small control-side mutation, never a claim. */
-export async function inspectWorker({ runtime, env = process.env, request, report = false, localChecks, capacity = storageCapacity, setup: initialSetup, requireAgent = false } = {}) {
+export async function inspectWorker({ runtime, env = process.env, request, report = false, localChecks, capacity = storageCapacity, setup: initialSetup, requireAgent = false, executionPool } = {}) {
   const workerId = workerIdForEnvironment(env);
   const requestApi = request ?? workerApiRequest(env), mode = requireAgent || Boolean(env.DEEPSEEK_API_KEY) ? 'agent' : 'verification';
   const modelConfigured = Boolean(env.DEEPSEEK_API_KEY?.trim());
@@ -52,7 +52,7 @@ export async function inspectWorker({ runtime, env = process.env, request, repor
     setup ??= await requestApi('/setup');
     if (!setup || typeof setup.roomId !== 'string' || !/^[a-f0-9]{64}$/.test(setup.projectDigest ?? '') || !setup.project || typeof setup.project.name !== 'string') throw Object.assign(new Error('Invalid setup response'), { code: 'camp_setup_invalid', status: 409 });
     const protocol = parseServerProtocol(await requestApi('/protocol'));
-    const { protocol: declaration, version } = selectWorkerDeclaration(protocol, { hasModel: mode === 'agent' });
+    const { protocol: declaration, version } = selectWorkerDeclaration(protocol, { hasModel: mode === 'agent', executionPool });
     protocolVersion = version;
     checkedServerCapabilities(protocol, declaration);
     apiAvailable = true; facts.set('api', check('api', 'passed', 'authenticated'));

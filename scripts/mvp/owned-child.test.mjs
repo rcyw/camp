@@ -42,11 +42,11 @@ test('spawn failures are observed without an unhandled error or invalid group si
   assert.deepEqual(await owned.stop(), result);
 });
 
-test('interrupting a smoke script stops its detached worker before the script exits', async () => {
+for (const group of [true, false]) test(`interrupting a smoke script stops its worker before exit with group=${group}`, async () => {
   const helper = JSON.stringify(new URL('./owned-child.mjs', import.meta.url).href);
   const script = `import { spawn } from 'node:child_process'; import { once } from 'node:events'; import { superviseOwnedChild } from ${helper};
-    const worker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
-    const owned = superviseOwnedChild(worker, { handleSignals: true });
+    const worker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: ${group}, stdio: 'ignore' });
+    const owned = superviseOwnedChild(worker, { group: ${group}, handleSignals: true });
     await once(worker, 'spawn'); process.stdout.write(String(worker.pid) + '\\n'); await owned.exited;`;
   const child = spawn(process.execPath, ['--input-type=module', '-e', script], { detached: true, stdio: ['ignore', 'pipe', 'inherit'] });
   const owned = superviseOwnedChild(child);
@@ -59,6 +59,6 @@ test('interrupting a smoke script stops its detached worker before the script ex
     assert.throws(() => process.kill(workerPid, 0), { code: 'ESRCH' });
   } finally {
     await owned.stop({ graceMs: 30 });
-    if (workerPid) removeTestGroup(workerPid);
+    if (workerPid && group) removeTestGroup(workerPid);
   }
 });

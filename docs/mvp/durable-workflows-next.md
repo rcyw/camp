@@ -1,6 +1,6 @@
-# Next: bounded concurrency and dependency plans
+# Next: dependency plans beyond bounded pairs
 
-This document proposes the parallel stage after [serial room delivery](./serial-room-workflow.md) and [trusted two-candidate integration](./trusted-integration.md). The current API accepts bounded ordered plans and executes one builder item at a time, followed by review and final acceptance. The explicit same-baseline pair now has trusted integration while its two builders still execute sequentially. Arbitrary dependency graphs and concurrent implementation remain disabled. The parallel request shape below is a proposal, not an accepted current request.
+This document proposes dependency graphs after [serial room delivery](./serial-room-workflow.md), [trusted two-candidate integration](./trusted-integration.md) and [bounded pair execution](./bounded-pair-execution.md). The current API accepts bounded ordered plans, the sequential `same_baseline_pair` and the explicit two-lane `parallel_pair`. Arbitrary dependency graphs remain disabled. The graph request shape below is a proposal, not an accepted current request.
 
 ## Product boundary
 
@@ -54,7 +54,7 @@ The supported integration mechanism is explicit and narrow:
 4. Persist the exact immutable integrated candidate, both parents, algorithm/policy version and evidence through an outbox. An operation replay must not create another accepted candidate or rewrite history.
 5. Run the frozen checks against the integrated candidate, then assign review to that exact identity. Separate approvals of the parents cannot approve their combination.
 
-Real LayerFS round-trip, conflicting-edit, deletion, binary/mode, no-op Layer, prior merge-Commit baseline, replay and interruption tests now establish this narrow contract. Parallel admission, aggregate resources, concurrent cancellation and multiple active leases still need separate acceptance.
+Real LayerFS round-trip, conflicting-edit, deletion, binary/mode, no-op Layer, prior merge-Commit baseline, replay and interruption tests establish this narrow contract. Two-lane admission, aggregate resources, concurrent cancellation and multiple active leases have their own contract and acceptance in the bounded pair guide. Those checks do not establish arbitrary graph or multi-host execution.
 Integration is a first-class durable operation with its own idempotency key and recovery state. An unknown integration outcome must be inspected before retrying. A conflicting integration becomes `needs_attention`; downstream review must not run against an arbitrary fallback candidate.
 
 ## Review contract
@@ -73,7 +73,7 @@ Keep multi-node automatic repair disabled in the first dynamic-plan release. A r
 
 ## Enablement gates
 
-The feature remains disabled until these checks pass:
+Arbitrary graph scheduling remains disabled until these checks pass:
 
 1. Concurrent identical plan submissions create one graph; changed replay, stale capability and cross-room/cross-goal edges are rejected.
 2. Cyclic, oversized and ambiguous plans are rejected without partially creating tasks.

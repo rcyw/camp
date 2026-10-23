@@ -17,11 +17,11 @@ function WorkerCommand({ commandKey, copied, onCopy }: { commandKey: keyof typeo
 }
 
 /** Keep the once-visible credential in this room-bound component's memory only. */
-export default function CampWorkerConnection({ roomId, expanded = false }: { roomId: string; expanded?: boolean }) {
-  return <WorkerConnectionState key={roomId} roomId={roomId} expanded={expanded} />;
+export default function CampWorkerConnection({ roomId, expanded = false, supportsParallel = false }: { roomId: string; expanded?: boolean; supportsParallel?: boolean }) {
+  return <WorkerConnectionState key={roomId} roomId={roomId} expanded={expanded} supportsParallel={supportsParallel} />;
 }
 
-function WorkerConnectionState({ roomId, expanded }: { roomId: string; expanded: boolean }) {
+function WorkerConnectionState({ roomId, expanded, supportsParallel }: { roomId: string; expanded: boolean; supportsParallel: boolean }) {
   const { formatMessage: t } = useIntl();
   const [token, setToken] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -34,6 +34,9 @@ function WorkerConnectionState({ roomId, expanded }: { roomId: string; expanded:
   const [imageId, setImageId] = useState("");
   const [bundlePath, setBundlePath] = useState("");
   const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
+  const [poolMode, setPoolMode] = useState(false);
+  const editLaunchMode = useCallback((event: ChangeEvent<HTMLSelectElement>) => setPoolMode(event.target.value === "pool"), []);
+  const commandKeys = (Object.keys(WORKER_COMMANDS) as Array<keyof typeof WORKER_COMMANDS>).filter(key => key === "start" ? !poolMode : key === "poolStart" ? poolMode && supportsParallel : true);
   const validSettings = workerSettingsValid(apiUrl.trim(), workerId.trim(), runtimeHome.trim(), imageId.trim(), bundlePath.trim());
   const editApi = useCallback((event: ChangeEvent<HTMLInputElement>) => setApiUrl(event.target.value), []);
   const editWorkerId = useCallback((event: ChangeEvent<HTMLInputElement>) => setWorkerId(event.target.value), []);
@@ -97,7 +100,8 @@ function WorkerConnectionState({ roomId, expanded }: { roomId: string; expanded:
       ) : <Button className="mt-3" variant="outline" size="sm" disabled={busy} onClick={issue}>{t({ id: "camp.issueToken" })}</Button>}
       <p className="mt-3 text-xs text-foreground-hint">{t({ id: "camp.setup.configHelp" })}</p>
       <p className="mt-2 text-xs text-foreground-hint">{t({ id: "camp.setup.modelHelp" })}</p>
-      <ol className="mt-4 flex flex-col gap-4">{(Object.keys(WORKER_COMMANDS) as Array<keyof typeof WORKER_COMMANDS>).map(key => <WorkerCommand key={key} commandKey={key} copied={copiedCommand === key} onCopy={copyCommand} />)}</ol>
+      {(supportsParallel || poolMode) && <div className="mt-4 rounded-lg border border-border-default p-3"><label className="flex flex-col gap-2 text-sm">{t({ id: "camp.setup.launchMode" })}<select className="rounded border border-border-default bg-layer-canvas p-2 text-sm" data-testid="camp-worker-launch-mode" value={poolMode ? "pool" : "single"} onChange={editLaunchMode}><option value="single">{t({ id: "camp.setup.launchSingle" })}</option><option value="pool" disabled={!supportsParallel}>{t({ id: "camp.setup.launchPool" })}</option></select></label>{poolMode && <p className="mt-2 text-xs text-foreground-hint">{t({ id: "camp.setup.poolHelp" })}</p>}{poolMode && !supportsParallel && <p className="mt-2 text-xs text-danger-strong" role="status">{t({ id: "camp.planMode.unavailable" })}</p>}</div>}
+      <ol className="mt-4 flex flex-col gap-4">{commandKeys.map(key => <WorkerCommand key={key} commandKey={key} copied={copiedCommand === key} onCopy={copyCommand} />)}</ol>
     </details>
   );
 }

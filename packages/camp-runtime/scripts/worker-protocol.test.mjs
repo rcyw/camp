@@ -8,7 +8,7 @@ import { createServer } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { startWorker } from '../src/worker.mjs';
 import { WorkerJournal } from '../src/durable-state.mjs';
-import { assertClaimCompatibility } from '../src/worker-protocol.mjs';
+import { assertClaimCompatibility, selectWorkerDeclaration } from '../src/worker-protocol.mjs';
 import { checkedRunPolicy } from '../src/run-policy.mjs';
 import { CAMP_PREFLIGHT_CHECK_IDS, createWorkerDeclaration, serverProtocol, getTaskRequirements } from '../../camp-protocol/src/index.js';
 
@@ -110,7 +110,7 @@ for (const mode of ['old-server', 'unknown-version', 'missing-capability', 'miss
   try {
     if (mode === 'old-server') f.server = Object.assign(new Error('Discovery does not exist'), { status: 404 });
     if (mode === 'unknown-version') f.server.supportedProtocolVersions = [99];
-    if (mode === 'missing-capability') f.server.capabilities.pop();
+    if (mode === 'missing-capability') f.server.capabilities = f.server.capabilities.filter(capability => capability !== 'layerfs.candidate.v1');
     if (mode === 'missing-kind') f.server.taskKinds.pop();
     if (mode === 'missing-reference') f.server.refKinds.pop();
     await assert.rejects(startWorker(f), error => error.status === 426);
@@ -140,7 +140,7 @@ test('a compatible idle claim declares capabilities and closes the confirmed emp
   try {
     await startWorker(f);
     assert.equal(f.claims.length, 1);
-    assert.deepEqual(f.claims[0].protocol, createWorkerDeclaration());
+    assert.deepEqual(f.claims[0].protocol, selectWorkerDeclaration(f.server).protocol);
     assert.equal(await f.journal.pendingClaim(), null);
     assert.equal(f.sessions, 0);
   } finally { await f.close(); }

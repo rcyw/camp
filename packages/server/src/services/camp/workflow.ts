@@ -5,6 +5,7 @@ import { createTasks } from "../taskService";
 import { stopGoal } from "./goals";
 import { enqueueVerification, needsVerification, requireVerificationGate } from "./verification";
 import { enqueueIntegration, needsIntegration, recordReviewedItem, requireIntegrationGate } from "./integration";
+import { roomOccupancy } from "./executionPool";
 import { sameCandidate } from "./candidates";
 import { CampError, type CampCandidate, type CampPlanItem, type CampReview, type CampTaskKind, type CampWorkflow } from "./types";
 
@@ -15,6 +16,7 @@ type Run = typeof campRuns.$inferSelect;
 const roleFor = (kind: Exclude<CampTaskKind, "verification" | "integration">) => kind === "plan" || kind === "summary" ? "planner" : kind === "build" ? "builder" : "reviewer";
 
 export async function assertRoomAdmission(tx: DatabaseExecutor, room: Room, workflow: CampWorkflow, excludeGoalId?: string) {
+  if ((await roomOccupancy(tx, room.id)).some(run => run.status !== "running")) throw new CampError(409, "cleanup_pending", "Confirm cleanup of the previous bounded-pool execution before admitting another attempt or goal");
   const goals = await tx.select().from(campGoals).where(and(eq(campGoals.roomId, room.id), excludeGoalId ? ne(campGoals.id, excludeGoalId) : undefined));
   const active = await tx.select({ goalId: sql<string>`coalesce(${campTasks.goalId}, ${campOperations.goalId})` }).from(campRuns).leftJoin(campTasks, eq(campTasks.taskId, campRuns.taskId)).leftJoin(campOperations, eq(campOperations.id, campRuns.operationId)).where(and(eq(campRuns.roomId, room.id), eq(campRuns.status, "running")));
   if (goals.some(goal => (workflow === "serial" || goal.workflow === "serial") && (["queued", "running", "waiting_question", "cancelling"].includes(goal.status) || active.some(run => run.goalId === goal.id)))) throw new CampError(409, "room_busy", "This Room already has an active delivery goal");
@@ -65,13 +67,15 @@ export async function advanceSerial(tx: DatabaseExecutor, room: Room, previousGo
   };
   if (binding.kind === "plan") {
     await tx.update(campGoals).set({ baseCandidate: goal.baseCandidate ?? inputCandidate, currentCandidate: inputCandidate }).where(eq(campGoals.id, goal.id));
-    await enqueue("build", inputCandidate, plan.items[0]);
+    if (goal.planMode === "parallel_pair") {
+      for (const nextItem of plan.items) await enqueue("build", inputCandidate, nextItem);
+    } else await enqueue("build", inputCandidate, plan.items[0]);
   } else if (binding.kind === "build") {
-    await tx.update(campGoals).set({ currentCandidate: candidate }).where(eq(campGoals.id, goal.id));
+    if (goal.planMode !== "parallel_pair" || !binding.planItemKey) await tx.update(campGoals).set({ currentCandidate: candidate }).where(eq(campGoals.id, goal.id));
     await enqueue(binding.planItemKey ? "review" : "final_review", candidate, item);
   } else if (binding.kind === "review" || binding.kind === "final_review") {
     if (!review) throw new CampError(409, "review_required", "The review verdict is missing");
-    await tx.update(campGoals).set({ currentCandidate: inputCandidate }).where(eq(campGoals.id, goal.id));
+    if (goal.planMode !== "parallel_pair" || !binding.planItemKey) await tx.update(campGoals).set({ currentCandidate: inputCandidate }).where(eq(campGoals.id, goal.id));
     if (review.outcome === "changes_requested") {
       if (goal.reviewRounds >= goal.budget.maxReviewRounds) { await stopGoal(tx, room, goal, "review_budget_exhausted"); return; }
       if (goal.runCount + (binding.kind === "final_review" ? needsVerification(goal) ? 4 : 3 : 2) > goal.budget.maxRuns) { await stopGoal(tx, room, goal, "run_budget_exhausted"); return; }
@@ -85,7 +89,9 @@ export async function advanceSerial(tx: DatabaseExecutor, room: Room, previousGo
       if (goal.reviewRounds >= goal.budget.maxReviewRounds) { await stopGoal(tx, room, goal, "review_budget_exhausted"); return; }
       if (needsIntegration(goal)) {
         const reviewedItems = await recordReviewedItem(tx, goal, binding, run.id, inputCandidate);
-        if (index + 1 < plan.items.length) {
+        if (goal.planMode === "parallel_pair") {
+          if (plan.items.every(value => reviewedItems[value.key])) await enqueueIntegration(tx, room, goal, plan.items, reviewedItems);
+        } else if (index + 1 < plan.items.length) {
           if (!goal.baseCandidate) throw new CampError(409, "integration_base_required", "The common immutable baseline is missing");
           await enqueue("build", goal.baseCandidate, plan.items[index + 1]);
         } else await enqueueIntegration(tx, room, goal, plan.items, reviewedItems);

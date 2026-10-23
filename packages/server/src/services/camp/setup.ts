@@ -48,7 +48,7 @@ export async function workerSetup(principal: CampPrincipal) {
     await validateWorker(tx, principal);
     const [room] = await tx.select().from(campRooms).where(eq(campRooms.id, principal.roomId));
     if (!room) throw new CampError(404, "room_not_found", "Room not found");
-    return { roomId: room.id, project: room.project, projectDigest: projectDigest(room.project), projectMutable: await mutableProject(tx, room) };
+    return { roomId: room.id, storageId: room.storageId, acceptedHead: { revision: room.acceptedRevision, goalId: room.acceptedGoalId, candidate: room.acceptedCandidate }, project: room.project, projectDigest: projectDigest(room.project), projectMutable: await mutableProject(tx, room) };
   });
 }
 

@@ -4,7 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { CampRuntime } from './index.mjs';
 import { LeaseGuard, checkedClaim, splitProgress } from './worker-core.mjs';
 import { WorkerJournal, acquireWorkerLock, runTokenForClaim } from './durable-state.mjs';
-import { recoverWorker, dispatchOutbox, checkedState } from './worker-recovery.mjs';
+import { recoverWorker, dispatchOutbox, checkedState, restoreWorkerForClaims } from './worker-recovery.mjs';
 import { createModelProxy } from './model-proxy.mjs';
 import { ModelBudget, RunLimitError, runLimits } from './run-limits.mjs';
 import { checkedRunPolicy, completionPolicy, controlledTurnResult, completionSummary } from './run-policy.mjs';
@@ -16,6 +16,7 @@ import { inspectWorker, workerApiRequest, workerApiUrl, workerIdForEnvironment }
 import { resourcePolicy, storageCapacity } from './resource-policy.mjs';
 import { runTrustedIntegration } from './integration.mjs';
 import { integrationCompletion } from './integration-completion.mjs';
+import { acquireHostManager, assertNoManagedContainers } from './host-manager.mjs';
 
 const transient = error => !['camp_journal_io', 'camp_journal_invalid'].includes(error.code) && (!error.status || error.status >= 500 || [408, 429].includes(error.status));
 export async function startWorker(options = {}) {
@@ -28,7 +29,9 @@ export async function startWorker(options = {}) {
   let limits;
   const heartbeatIntervalMs = options.heartbeatIntervalMs ?? 8000;
   if (!Number.isSafeInteger(heartbeatIntervalMs) || heartbeatIntervalMs <= 0 || heartbeatIntervalMs > 10000) throw new Error('Heartbeat interval must be a positive integer at most 10000ms');
-  const runtime = options.runtime ?? new CampRuntime();
+  const runtime = options.runtime ?? new CampRuntime({ env });
+  const standalone = runtime instanceof CampRuntime && !options.executionPool;
+  const restoreOnlyRecovery = options.restoreOnlyRecovery || standalone;
   const pluginPath = env.CAMP_DSH_PLUGIN ?? fileURLToPath(new URL('../../dsh-plugin', import.meta.url));
   const log = options.log ?? (entry => console.log(JSON.stringify(entry)));
   let stopping = false;
@@ -36,9 +39,12 @@ export async function startWorker(options = {}) {
   const stop = () => { stopping = true; activeAbort?.abort(new Error('Worker stopping')); };
   const signalSource = options.signalSource ?? process;
   for (const signal of ['SIGTERM', 'SIGINT']) signalSource.on(signal, stop);
-  let lock;
+  let lock, hostManager;
   try {
-    lock = await acquireWorkerLock(workerId, { onLost: error => { stopping = true; activeAbort?.abort(error); } });
+    // Only a plain-object runtime is a test seam. An explicitly supplied real
+    // Runtime obeys the same manager lock as the CLI's default instance.
+    hostManager = options.manager ?? (runtime instanceof CampRuntime ? await (options.acquireManager ?? acquireHostManager)({ runtime, onLost: error => { stop(); options.onFatal?.(error); } }) : null);
+    lock = await acquireWorkerLock(workerId, { onLost: error => { stopping = true; activeAbort?.abort(error); options.onFatal?.(error); } });
     const journal = options.journal ?? await new WorkerJournal({ home: runtime.home, apiUrl, workerId }).ready();
     const request = options.request ?? workerApiRequest(apiConfiguration);
     let createSession = options.createSession;
@@ -50,7 +56,7 @@ export async function startWorker(options = {}) {
     const admitExecution = options.admitExecution ?? (async () => {
       const setup = await request('/setup');
       if (!checkedProjectDigest || setup.projectDigest !== checkedProjectDigest) {
-        const checked = await inspectWorker({ runtime, env: { ...env, CAMP_WORKER_ID: workerId }, request, report: true, setup, localChecks: options.preflightChecks, capacity: checkCapacity });
+        const checked = await inspectWorker({ runtime, env: { ...env, CAMP_WORKER_ID: workerId }, request, report: true, setup, localChecks: options.preflightChecks, capacity: checkCapacity, executionPool: options.executionPool });
         log({ event: 'worker_preflight', workerId, ready: checked.ready, report: checked.report });
         if (!checked.ready) {
           if (checked.apiFailure) throw Object.assign(new Error(checked.apiFailure.retryable ? 'Worker preflight API is temporarily unavailable; no task was allocated' : 'Worker preflight API authentication or compatibility failed; no task was allocated'), checked.apiFailure);
@@ -266,10 +272,12 @@ export async function startWorker(options = {}) {
         await progress;
         if (record.completion) {
           await journal.update(record, { cleanupKnown, phase: cleanupKnown ? 'completion_pending' : 'result_staged' });
+          if (!cleanupKnown) options.onFatal?.(Object.assign(new Error('Attempt cleanup was not confirmed; stop all execution lanes'), { code: 'camp_pool_unsafe', status: 409 }));
           log({ event: 'completion_outcome_unknown', runId: claim.id, epoch: claim.epoch });
         } else {
           const executionPolicyFailure = ['camp_capacity_low', 'camp_capacity_unavailable', 'camp_resource_policy', 'camp_resource_enforcement_failed'].includes(error.code);
           const inspectionRequired = error.requiresInspection === true || error.code === 'camp_integration_inspection_required' || (claim.executor === 'integration' && record.phase === 'integrating');
+          if (!cleanupKnown || inspectionRequired) options.onFatal?.(Object.assign(new Error(inspectionRequired ? 'An operation requires inspection; stop all execution lanes' : 'Attempt cleanup was not confirmed; stop all execution lanes'), { code: inspectionRequired ? 'camp_integration_inspection_required' : 'camp_pool_unsafe', status: 409 }));
           const lastErrorCode = inspectionRequired && claim.executor === 'integration' ? 'camp_integration_inspection_required' : stopping ? 'worker_shutdown' : error.code === 'run_budget_exhausted' || executionPolicyFailure ? error.code : error.code === 'camp_api_transport' || (error.status && transient(error)) ? 'worker_interrupted' : claim.executor === 'verification' ? 'verification_execution_failed' : claim.executor === 'integration' ? 'camp_integration_failed' : 'dsh_execution_failed';
           const lastError = String(error.message ?? error).slice(0, 15000);
           const failureCompletion = { ...context, status: 'failed', summary: `Execution stopped: ${lastError}`.slice(0, 15000), error: lastErrorCode, ...(sessionId ? { sessionId } : {}) };
@@ -299,12 +307,18 @@ export async function startWorker(options = {}) {
 
     log({ event: 'worker_ready', workerId, apiUrl, journalHome: journal.folder });
     let backoff = 500;
+    let recoveryBarrierPassed = false;
     while (!stopping) {
       try {
+        if (restoreOnlyRecovery) await restoreWorkerForClaims({ journal, runtime, request, workerToken, log });
         const pendingClaim = await journal.pendingClaim();
         // Resolve an ambiguous claim using its original id before reconciliation;
         // otherwise reconciliation could fail a claim whose response alone was lost.
-        if (!pendingClaim) await recoverWorker({ journal, runtime, request, log });
+        if (!pendingClaim || restoreOnlyRecovery) await recoverWorker({ journal, runtime, request, log });
+        if (!recoveryBarrierPassed && options.recoveryBarrier) {
+          await options.recoveryBarrier({ journal, runtime, workerId });
+          recoveryBarrierPassed = true;
+        }
         if (stopping) break;
         let negotiated;
         try {
@@ -313,7 +327,7 @@ export async function startWorker(options = {}) {
           runtime.resourcePolicy ??= resourcePolicy(env);
           await admitExecution();
           await checkCapacity();
-          negotiated = await negotiateWorker({ request, pluginPath, env });
+          negotiated = await negotiateWorker({ request, pluginPath, env, executionPool: options.executionPool });
         }
         catch (error) {
           // A pending intent might already own a run. Read-only state and exact
@@ -321,6 +335,9 @@ export async function startWorker(options = {}) {
           if (pendingClaim) await recoverWorker({ journal, runtime, request, log });
           throw error;
         }
+        if (stopping) break;
+        await options.beforeClaim?.({ journal, runtime, workerId });
+        if (standalone) await assertNoManagedContainers(runtime);
         if (stopping) break;
         const claimId = pendingClaim ?? await journal.claimIntent();
         const value = await request('/claim', { workerId, claimId, runToken: runTokenForClaim(workerToken, claimId), protocol: negotiated.protocol });
@@ -340,18 +357,22 @@ export async function startWorker(options = {}) {
             await recoverWorker({ journal, runtime, request, log });
             throw protocolFailure(`Claim retained for safe recovery: ${error.message}`, error.code ?? 'protocol_required');
           }
+          await options.beforeExecution?.({ claim, record, journal, runtime, workerId });
           await executeRun(claim, record, negotiated.harnesses);
+          await options.afterExecution?.({ claim, record, journal, runtime, workerId });
         } else {
           await journal.finishClaim();
           const unmatched = unmatchedTaskKind(value, negotiated.protocol);
           if (value.compatibility?.status === 'incompatible' && !unmatched) throw protocolFailure(`Camp cannot assign compatible work (${value.compatibility.code ?? 'capability_missing'})`, value.compatibility.code ?? 'capability_missing');
           if (unmatched) log({ event: 'worker_waiting_for_task_kind', workerId, requiredTaskKind: value.requirements.taskKind, offeredTaskKinds: negotiated.protocol.taskKinds });
           if (!unmatched && !value.closed && !['compatible', 'legacy'].includes(value.compatibility?.status) && !(value.compatibility === null && value.requirements === null)) throw protocolFailure('Camp claim omitted its compatibility result', 'protocol_required');
+          if (!value.closed) await options.onIdle?.({ journal, runtime, workerId });
           if (env.CAMP_WORKER_ONCE === '1' && !value.closed) break;
           await delay(1500);
         }
         backoff = 500;
       } catch (error) {
+        if (stopping && error.code === 'camp_pool_stopped') break;
         if (!transient(error)) {
           log({ event: error.code?.startsWith('camp_journal_') ? 'worker_state_failed' : error.status === 401 ? 'worker_token_rejected' : 'worker_protocol_rejected', workerId, status: error.status, reason: error.message, action: 'Inspect the journal and credential before restarting.' });
           throw error;
@@ -364,6 +385,7 @@ export async function startWorker(options = {}) {
   } finally {
     for (const signal of ['SIGTERM', 'SIGINT']) signalSource.off(signal, stop);
     await lock?.release();
+    if (hostManager && hostManager !== options.manager) await hostManager.release();
   }
 }
 

@@ -60,7 +60,7 @@ test('preflight checks the actual agent/verifier declaration and the selected v1
     let checkedVersion;
     const result = await inspectWorker({ runtime: {}, env: configuration, request: async path => path === '/setup' ? setup : metadata, localChecks: async options => { checkedVersion = options.protocolVersion; return localChecks(); }, capacity: async () => {} });
     assert.equal(result.ready, ready);
-    assert.equal(checkedVersion, !configuration.DEEPSEEK_API_KEY && Math.max(...metadata.supportedProtocolVersions) < 2 ? undefined : Math.max(...metadata.supportedProtocolVersions));
+    assert.equal(checkedVersion, !configuration.DEEPSEEK_API_KEY && Math.max(...metadata.supportedProtocolVersions) < 2 ? undefined : Math.min(3, Math.max(...metadata.supportedProtocolVersions)));
     assert.equal(result.report.checks.find(item => item.id === 'api').status, ready ? 'passed' : 'failed');
     if (!ready) assert.equal(result.apiFailure.retryable, false);
   }

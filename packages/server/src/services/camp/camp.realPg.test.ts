@@ -595,3 +595,64 @@ test("migrations 375 through 380 preserve legacy probes without inventing worker
     await rm(folder, { recursive: true, force: true });
   }
 });
+
+test("real PostgreSQL v4 pool admission serializes concurrent lane claims and preserves unknown cleanup occupancy", { skip: !(url || required), timeout: 120_000 }, async () => {
+  assert.ok(url, "CAMP_REAL_PG_URL is required");
+  const database = `camp_parallel_${randomUUID().replaceAll("-", "")}`, admin = new pg.Client({ connectionString: url });
+  await admin.connect(); let initialized = false;
+  const connection = new URL(url); connection.pathname = `/${database}`;
+  try {
+    await admin.query(`CREATE DATABASE "${database}"`);
+    const pool = new pg.Pool({ connectionString: connection.toString() });
+    try { await migrate(drizzle(pool, { schema }), { migrationsFolder: fileURLToPath(new URL("../../../drizzle", import.meta.url)) }); } finally { await pool.end(); }
+    await initDatabase(connection.toString()); initialized = true; const db = getDb();
+    const [owner] = await db.insert(schema.users).values({ name: "parallel-owner", email: `${database}@test.invalid`, passwordHash: "test-only", emailVerified: true }).returning();
+    const server = await createServer("Camp parallel", database, owner.id), channel = await createChannel(server.id, "parallel"); await addHuman(channel.id, owner.id);
+    const room = await createRoom(server.id, owner.id, { channelId: channel.id, name: "Parallel room", project: { name: "fixture" } });
+    await setVerificationPolicy(room.id, owner.id, { id: "acceptance", revision: 1, name: "Independent checks", checks: [{ id: "test", label: "Node checks", argv: ["node", "--test"], timeoutMs: 1000 }], maxRepairAttempts: 1 });
+    const goal = await createPipeline(room.id, owner.id, { title: "Two independent items", planMode: "parallel_pair" });
+    const token = await mintWorkerToken(room.id, owner.id), principal = await authenticateCampToken(token.token);
+    const executionPool = { poolId: randomUUID(), storageId: "a".repeat(64), maxParallel: 2 as const, workerIds: ["lane-1", "lane-2"], resources: { maxContainers: 4 as const, cpuMillis: 4000, memoryBytes: 8 * 1024 ** 3, pidsLimit: 1024 } }, declaration = { ...createWorkerDeclaration(), executionPool };
+    const restore = await claimRunDetailed(principal, "lane-1", { claimId: randomUUID(), runToken: `camp_run_${"b".repeat(64)}` }, undefined, true); assert.equal(restore.unbound, true); assert.equal((await db.select().from(schema.campRuns)).length, 0);
+    const [planner] = await Promise.all([claimRunDetailed(principal, "lane-1", undefined, declaration), claimRunDetailed(principal, "lane-1", undefined, declaration)]).then(values => values.sort((left, right) => Number(Boolean(right.run)) - Number(Boolean(left.run))));
+    assert.ok(planner.run?.executor === "agent"); const planning = planner.run;
+    const baseline = { type: "layerfs" as const, projectId: "p-0123456789abcdef", refKind: "layer" as const, refId: `32${"a".repeat(64)}`, layerId: `32${"a".repeat(64)}`, rootId: "b".repeat(64), imageId: `sha256:${"c".repeat(64)}` };
+    await submitPlan(principal, planning.id, { workerId: "lane-1", epoch: planning.epoch, planRevision: 1, summary: "Two independent items", tasks: ["alpha", "beta"].map(key => ({ key, title: key, description: key, acceptance: key, verification: key })) });
+    await completeRun(principal, planning.id, "lane-1", planning.epoch, { status: "completed", summary: "Planned", inputCandidate: baseline, candidate: { ...baseline, baseRef: baseline.refId } });
+    const intents = [1, 2, 3].map(() => ({ claimId: randomUUID(), runToken: `camp_run_${randomUUID().replaceAll("-", "")}${randomUUID().replaceAll("-", "")}` }));
+    const claims = await Promise.all([claimRunDetailed(principal, "lane-1", intents[0], declaration), claimRunDetailed(principal, "lane-2", intents[1], declaration), claimRunDetailed(principal, "lane-1", intents[2], declaration)]);
+    const allocated = claims.flatMap(result => result.run ? [result.run] : []); assert.equal(allocated.length, 2); assert.ok(allocated.every(run => run.executor === "agent" && run.taskKind === "build")); assert.equal(new Set(allocated.map(run => run.taskId)).size, 2);
+    assert.equal((await db.select().from(schema.campRuns).where(eq(schema.campRuns.status, "running"))).length, 2); assert.equal((await db.select().from(schema.campGoals).where(eq(schema.campGoals.id, goal.goalId)))[0].runCount, 3);
+    const original = allocated[0]; const workerId = (await db.select().from(schema.campRuns).where(eq(schema.campRuns.id, original.id)))[0].workerId;
+    const intent = workerId === "lane-1" ? intents[0] : intents[1];
+    const liveReplay = await claimRunDetailed(principal, workerId, intent, undefined, true); assert.equal(liveReplay.run?.id, original.id);
+    await db.update(schema.campRuns).set({ leaseExpiresAt: sql`clock_timestamp() - interval '1 second'` }).where(eq(schema.campRuns.id, original.id)); await reconcileCampPass();
+    assert.equal((await claimRunDetailed(principal, workerId, undefined, declaration)).run, null, "Fenced physical work still occupies the original lane");
+    const wrongPool = await claimRunDetailed(principal, workerId, undefined, { ...declaration, executionPool: { ...executionPool, poolId: randomUUID() } }); assert.equal(wrongPool.compatibility?.code, "pool_mismatch"); assert.equal((await db.select().from(schema.campGoals).where(eq(schema.campGoals.id, goal.goalId)))[0].runCount, 3);
+    const { confirmRunCleanup } = await import("./runs"); await confirmRunCleanup(principal, original.id, workerId, original.epoch);
+    const next = await claimRunDetailed(principal, workerId, undefined, declaration); assert.equal(next.run?.taskId, original.taskId); assert.equal(next.run?.epoch, original.epoch + 1);
+    assert.equal((await db.select().from(schema.campRuns).where(eq(schema.campRuns.status, "running"))).length, 2);
+    await assert.rejects(db.update(schema.campRooms).set({ storageId: "invalid" }).where(eq(schema.campRooms.id, room.id)), (error: any) => error.cause?.code === "23514");
+    await db.update(schema.campGoals).set({ deadlineAt: sql`clock_timestamp() - interval '1 second'` }).where(eq(schema.campGoals.id, goal.goalId)); await reconcileCampPass();
+    const draining = await db.select().from(schema.campRuns).where(and(eq(schema.campRuns.roomId, room.id), eq(schema.campRuns.status, "running")));
+    assert.equal(draining.length, 2); assert.ok(draining.every(run => run.cancelRequestedAt !== null), "Duration exhaustion drains both active lanes");
+    assert.equal((await db.select().from(schema.campGoals).where(eq(schema.campGoals.id, goal.goalId)))[0].reason, "duration_budget_exhausted");
+    const budgetChannel = await createChannel(server.id, "parallel-last-budget"); await addHuman(budgetChannel.id, owner.id);
+    const budgetRoom = await createRoom(server.id, owner.id, { channelId: budgetChannel.id, name: "Last budget slot", project: { name: "fixture" } });
+    await setVerificationPolicy(budgetRoom.id, owner.id, { id: "acceptance", revision: 1, name: "Independent checks", checks: [{ id: "test", label: "Node checks", argv: ["node", "--test"], timeoutMs: 1000 }], maxRepairAttempts: 1 });
+    const bounded = await createPipeline(budgetRoom.id, owner.id, { title: "Only one final run is available", planMode: "parallel_pair", budget: { maxRuns: 2 } });
+    const budgetToken = await mintWorkerToken(budgetRoom.id, owner.id), budgetPrincipal = await authenticateCampToken(budgetToken.token), planningBudget = (await claimRunDetailed(budgetPrincipal, "lane-1", undefined, declaration)).run;
+    assert.ok(planningBudget?.executor === "agent");
+    await submitPlan(budgetPrincipal, planningBudget.id, { workerId: "lane-1", epoch: planningBudget.epoch, planRevision: 1, summary: "Two independent items", tasks: ["alpha", "beta"].map(key => ({ key, title: key, description: key, acceptance: key, verification: key })) });
+    await completeRun(budgetPrincipal, planningBudget.id, "lane-1", planningBudget.epoch, { status: "completed", summary: "Planned", inputCandidate: baseline, candidate: { ...baseline, baseRef: baseline.refId } });
+    const finalClaims = await Promise.all([claimRunDetailed(budgetPrincipal, "lane-1", undefined, declaration), claimRunDetailed(budgetPrincipal, "lane-2", undefined, declaration)]);
+    assert.equal(finalClaims.filter(result => result.run !== null).length, 1, "The Room lock cannot overspend the last available run");
+    const [boundedGoal] = await db.select().from(schema.campGoals).where(eq(schema.campGoals.id, bounded.goalId));
+    assert.equal(boundedGoal.runCount, 2); assert.equal(boundedGoal.reason, "run_budget_exhausted");
+    const budgetRuns = await db.select().from(schema.campRuns).where(eq(schema.campRuns.roomId, budgetRoom.id)); assert.equal(budgetRuns.length, 2); assert.ok(budgetRuns.find(run => run.status === "running")?.cancelRequestedAt);
+
+  } finally {
+    if (initialized) await closeDatabase();
+    await admin.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`); await admin.end();
+  }
+});

@@ -23,7 +23,8 @@ Camp customizations.
 Use the [serial workflow contract](docs/mvp/serial-room-workflow.md) and
 [architecture boundaries](docs/mvp/architecture-review.md) when changing Camp
 execution. For same-baseline plans, also follow the
-[trusted integration contract](docs/mvp/trusted-integration.md). Keep task
+[trusted integration contract](docs/mvp/trusted-integration.md). For parallel
+pairs, follow the [bounded pool contract](docs/mvp/bounded-pair-execution.md). Keep task
 ownership and lifecycle in the control side and trusted Worker, preserve
 immutable candidate identities, and verify recovery and
 protocol compatibility at the affected boundaries. The existing CLI-specific

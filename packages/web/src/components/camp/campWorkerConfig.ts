@@ -29,6 +29,7 @@ export const WORKER_COMMANDS = {
   init: "node --env-file=.camp/worker.env packages/camp-runtime/scripts/worker-ops.mjs init",
   doctor: "node --env-file=.camp/runtime.env --env-file=.camp/worker.env packages/camp-runtime/scripts/doctor.mjs --report --require-agent",
   start: "node --env-file=.camp/runtime.env --env-file=.camp/worker.env --import @oxc-node/core/register packages/camp-runtime/src/worker.mjs",
+  poolStart: "node --env-file=.camp/runtime.env --env-file=.camp/worker.env --import @oxc-node/core/register packages/camp-runtime/scripts/worker-pool.mjs",
   reap: "node --env-file=.camp/worker.env packages/camp-runtime/scripts/worker-ops.mjs reap",
   reapApply: "node --env-file=.camp/worker.env packages/camp-runtime/scripts/worker-ops.mjs reap --apply",
 } as const;

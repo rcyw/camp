@@ -48,7 +48,7 @@ apiTest("Camp requires a declaration for new serial allocation and records compa
 
 apiTest("Camp rejects malformed declarations and unknown envelope fields while advertising the shared protocol read-only", async ({ seed, http, app, db }) => {
   const kit = await fixture({ seed, http, app });
-  const info = await kit.worker("/protocol"); assert.equal(info.status, 200); const metadata = await info.json() as { supportedProtocolVersions: number[]; capabilities: string[] }; assert.deepEqual(metadata.supportedProtocolVersions, [1, 2, 3]); assert.deepEqual([...metadata.capabilities].sort(), [...CAMP_CAPABILITIES].sort());
+  const info = await kit.worker("/protocol"); assert.equal(info.status, 200); const metadata = await info.json() as { supportedProtocolVersions: number[]; capabilities: string[] }; assert.deepEqual(metadata.supportedProtocolVersions, [1, 2, 3, 4]); assert.deepEqual([...metadata.capabilities].sort(), [...CAMP_CAPABILITIES].sort());
   for (const protocol of [
     { ...fullProtocol, internal: true }, { ...fullProtocol, protocolVersions: [] },
     { ...fullProtocol, protocolVersions: [0] }, { ...fullProtocol, workerVersion: "x".repeat(101) },
@@ -124,7 +124,7 @@ apiTest("Camp modern legacy claims freeze the same selected dependency candidate
   const candidate = { ...inputCandidate, refKind: "commit", refId: `12${"d".repeat(64)}`, commitId: `12${"d".repeat(64)}`, layerId: undefined, rootId: "e".repeat(64), baseRef: inputCandidate.refId };
   const finished = await kit.worker(`/runs/${builder.run.id}/complete`, { workerId: "protocol-worker", epoch: builder.run.epoch, status: "completed", summary: "The legacy builder produced a trusted candidate", inputCandidate, candidate }); assert.equal(finished.status, 200, await finished.clone().text());
   const submitted = await kit.user.request(`/api/camp/rooms/${kit.room.id}/tasks`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Review that legacy builder candidate", role: "reviewer", dependsOn: [builder.run.taskId] }) }); assert.equal(submitted.status, 201, await submitted.clone().text());
-  const reviewed = await kit.claim({ ...fullProtocol, taskKinds: ["review"], refKinds: ["commit"] }); assert.ok(reviewed.run); assert.equal(reviewed.run.inputCandidate?.refId, candidate.refId); assert.equal(reviewed.run.protocolVersion, 1); assert.deepEqual(reviewed.run.workerProtocol?.requirements, getTaskRequirements(reviewed.run)); assert.deepEqual(reviewed.run.workerProtocol?.requirements.refKinds, ["commit"]);
+  const reviewed = await kit.claim({ ...fullProtocol, protocolVersions: [1, 2, 3, 4], taskKinds: ["review"], refKinds: ["commit"] }); assert.ok(reviewed.run); assert.equal(reviewed.run.inputCandidate?.refId, candidate.refId); assert.equal(reviewed.run.protocolVersion, 2); assert.deepEqual(reviewed.run.workerProtocol?.requirements, getTaskRequirements(reviewed.run)); assert.deepEqual(reviewed.run.workerProtocol?.requirements.refKinds, ["commit"]);
   const context = await kit.worker(`/runs/${reviewed.run.id}/context`, undefined, reviewed.run.runToken); assert.equal(context.status, 200); const body = await context.json() as { inputCandidate: { refId: string }; workerProtocol: unknown }; assert.equal(body.inputCandidate.refId, candidate.refId); assert.deepEqual(body.workerProtocol, reviewed.run.workerProtocol);
 });
 
@@ -155,4 +155,21 @@ apiTest("Camp legacy review target follows the explicit authoritative input even
   const { run } = await kit.claim(fullProtocol); assert.ok(run); assert.equal(run.inputCandidate?.refId, explicit.refId);
   const context = await kit.worker(`/runs/${run.id}/context`, undefined, run.runToken); assert.equal(context.status, 200);
   assert.equal((await context.json() as { reviewTarget: { refId: string } }).reviewTarget.refId, explicit.refId);
+});
+
+
+apiTest("Camp modern legacy negotiation selects v2 and a v4-only declaration cannot allocate legacy work", async ({ seed, http, app, db }) => {
+  const kit = await fixture({ seed, http, app }, true);
+  const unsupported = await kit.claim({ ...fullProtocol, protocolVersions: [4] }); assert.equal(unsupported.run, null); assert.equal(unsupported.compatibility?.code, "protocol_unsupported");
+  const [before] = await db.select().from(campGoals).where(eq(campGoals.id, kit.goal.id)); assert.equal(before.runCount, 0); assert.equal(before.protocolVersion, null);
+  const allocated = await kit.claim({ ...fullProtocol, protocolVersions: [1, 2, 3, 4] }); assert.ok(allocated.run); assert.equal(allocated.run.protocolVersion, 2); assert.equal(allocated.run.workerProtocol?.version, 2); assert.deepEqual(allocated.run.workerProtocol?.requirements, getTaskRequirements(allocated.run));
+});
+apiTest("Camp legacy v2 builders without a diff capability can complete their original non-delivery contract", async ({ seed, http, app, db }) => {
+  const kit = await fixture({ seed, http, app }, true, "builder");
+  const claim = await kit.claim({ ...fullProtocol, protocolVersions: [1, 2, 3, 4] }); assert.ok(claim.run); assert.equal(claim.run.protocolVersion, 2); assert.equal(claim.run.workerProtocol?.requirements.capabilities.includes("candidate-diff.v1"), false);
+  const candidate = { type: "layerfs", projectId: "p-0123456789abcdef", refKind: "layer", refId: `32${"a".repeat(64)}`, layerId: `32${"a".repeat(64)}`, rootId: "b".repeat(64), imageId: `sha256:${"c".repeat(64)}` };
+  const body = { workerId: "protocol-worker", epoch: claim.run.epoch, status: "completed", summary: "Legacy task completed without a serial delivery diff", inputCandidate: candidate, candidate };
+  const completed = await kit.worker(`/runs/${claim.run.id}/complete`, body); assert.equal(completed.status, 200, await completed.clone().text());
+  assert.equal((await kit.worker(`/runs/${claim.run.id}/complete`, body)).status, 200, "The unchanged completion remains replayable");
+  const [goal] = await db.select().from(campGoals).where(eq(campGoals.id, kit.goal.id)); assert.equal(goal.status, "completed"); assert.equal(goal.protocolVersion, null); assert.equal(goal.runCount, 1);
 });

@@ -2,9 +2,10 @@
   "protocolVersions": [
     1,
     2,
-    3
+    3,
+    4
   ],
-  "workerVersion": "0.5.0",
+  "workerVersion": "0.6.0",
   "taskKinds": [
     "plan",
     "build",

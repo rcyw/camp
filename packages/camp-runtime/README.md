@@ -4,6 +4,102 @@ This package is the trusted worker and LayerFS adapter for Camp rooms. It runs o
 
 The worker currently launches from the Camp repository root on one local storage host. It shares the daemon package's ACP client rather than implementing another agent engine.
 
+## Bounded two-lane pool (0.6.0)
+
+For a `parallel_pair` goal, stop the serial worker and start one pool manager
+on the same Linux host and with the same `CAMP_RUNTIME_HOME`, Room credential,
+image, toolchain bundle and source configuration:
+
+```sh
+node --env-file=.camp/worker.env --import @oxc-node/core/register \
+  packages/camp-runtime/scripts/worker-pool.mjs
+```
+
+The supervisor runs two ordinary serial Worker lanes in one Node process.
+Each has a separate stable WorkerID, journal, Runtime instance, branch and
+sandbox. Planner, builder and reviewer remain logical Room roles; the pool is
+not another role scheduler. The server chooses work and freezes the pool's
+identity and resource declaration. Standalone workers advertise protocols
+1–3; only this manager advertises protocol 4 and `bounded-pair.v1`. An older
+server cannot silently turn a pool request into serial parallel work.
+
+`execution-pool.json` is private, atomically persisted and binds the original
+API URL, base WorkerID, random pool/Store identities, Docker daemon ID and
+resource configuration. Do not delete or regenerate it to bypass a mismatch.
+Existing serial and lane outboxes are recovered before checking replacement
+execution limits, including a first pool upgrade with invalid new limits.
+Changing limits cannot rewrite the declaration or authorize a new claim for
+an already pinned goal.
+Both lane IDs survive process restarts. A daemon-and-Unix-user `flock` outside
+the runtime home excludes another production manager, including a standalone
+worker using another home. This is one manager per local host/user, not a
+multi-host allocator. Operator calls that instantiate a Runtime directly, and
+the export CLI, are maintenance operations outside the pool's admission
+contract; stop the manager before running them.
+The lock alone does not prove physical cleanup after SIGKILL. A standalone
+worker also refuses new claims while any managed attempt container remains;
+it leaves foreign resources for their original manager to recover.
+
+Before either lane can allocate new work, the manager restores the original
+base Worker journal and both lane journals. Pending intents use
+`restoreOnly:true`, which can recover an existing binding but cannot allocate
+a run or spend a budget. Exact old outboxes retain their original payload,
+WorkerID and epoch, including older protocol metadata. A confirmed unbound
+base-worker intent is retired during upgrade; lane intents remain reusable
+after the barrier. Foreign pending journals, unknown containers, ownership
+conflicts and operations requiring inspection block the pool. Recovery never
+kills resources merely because their names resemble a different worker's.
+Restoration first requires explicit version 4 server discovery. With an older
+server and a pending intent, the worker can replay already recorded outboxes
+but preserves the unresolved intent and stops, without sending a claim whose
+unknown `restoreOnly` field might be ignored. With no pending intent, ordinary
+version 1–3 serial execution remains supported.
+
+The pool reserves at most two executing attempts and four Docker containers:
+one main sandbox and one snapshot helper per lane. Helpers are counted and
+checks remain serial within each verification operation. Default agent bounds
+of 2 CPU, 2 GiB and 256 PIDs therefore reserve a worst-case total of 8 CPU,
+8 GiB and 1024 PIDs. Host admission also requires 1 GiB memory headroom,
+kernel/available cgroup PID headroom and the free-space floor plus 2 GiB for
+bounded private snapshots. `CAMP_POOL_HOST_MEMORY_RESERVE_MIB` may change host
+headroom (minimum 512 MiB); the existing `CAMP_AGENT_*` limits control the
+lane policy. Smaller agent CPU/PID settings still reserve the fixed verifier
+check bounds. Admission uses Docker host capacity and exact container cgroup
+readback; it is not a Docker parent-cgroup hard limit for the supervisor or
+trusted host tools. Other host workloads can still consume those resources.
+
+The pinned LayerFS SDK has no creation-time CPU/memory/PID options. Container
+creation is serialized through the shared guard, then Docker limits are
+applied and read back before any agent code is installed or launched. The
+trusted filesystem daemon has a short startup window before those limits;
+this is a documented SDK limitation. Plain verification containers receive
+limits directly in `docker create` and verify them after start.
+
+A slot remains reserved until journaled cleanup and an actual empty owned
+container prefix agree. Process exit, SIGKILL and lease expiry do not release
+orphaned resources. Any lane fatal error, lock loss, unknown native outcome
+or unconfirmed cleanup disables all new claims and stops both lanes; the
+supervisor awaits their existing stop/cleanup/outbox paths before releasing
+its locks. SIGTERM/SIGINT use this same drain path. `--once` runs until both
+lanes report idle with zero active attempts; one idle lane cannot interrupt
+its active sibling. Waiting for human clarification can legitimately leave
+the pool idle and end this explicit one-shot invocation.
+
+Relevant zero-model checks:
+
+```sh
+node --test packages/camp-runtime/scripts/worker-pool.test.mjs
+node --test packages/camp-runtime/scripts/*.test.mjs
+```
+
+After stopping the manager, `scripts/verify-worker-pool.mjs --real` proves four
+plain Docker orphans survive SIGKILL and disappear before another claim. Add
+`--fail-after=1` or `--fail-after=3` to check partial startup cleanup. This helper
+uses synthetic API responses and no model or LayerFS mutation; it complements
+the separate real LayerFS workflow acceptance. Failure cleanup reads its
+private fsynced journals after the owned child group has exited. An unresolved
+Docker creation retains inspection evidence rather than claiming cleanup.
+
 ## Prerequisites and build
 
 Use Linux with glibc, Node 24, the repository's pnpm dependencies, host Git,
@@ -135,7 +231,7 @@ The host starts a per-run streaming model proxy on the run container's local Doc
 
 ## Protocol and capability negotiation
 
-Worker `0.5.0` supports Camp protocols `1`, `2` and `3`. Protocol 3 adds roleless trusted integration for an explicit same-baseline pair; default sequential goals retain protocol 2. See the [trusted integration guide](../../docs/mvp/trusted-integration.md). Protocol 2 adds candidate diffs and roleless trusted verification to the six agent task kinds. Before allocating a claim the worker reads `/api/camp/worker/protocol`, selects a supported version and declares its actual task/reference/capability and installed harness support. A protocol 1 server receives the old six-kind/seven-capability declaration without v2 harness fields. A missing discovery endpoint, unknown version or missing capability for an offered task stops new allocation with a diagnostic. A specialized worker leaves known task kinds it does not offer for another worker and remains idle; with `CAMP_WORKER_ONCE=1` it exits normally. Missing harnesses or capabilities for its own task kind still require an operator correction. Every empty claim clears its unused intent.
+Worker `0.6.0` supports Camp protocols `1`–`4`. Only supervised pool lanes offer protocol 4; standalone Workers offer versions 1–3. Protocol 3 adds roleless trusted integration for an explicit same-baseline pair; default sequential goals retain protocol 2. See the [trusted integration guide](../../docs/mvp/trusted-integration.md) and [bounded pair contract](../../docs/mvp/bounded-pair-execution.md). Protocol 2 adds candidate diffs and roleless trusted verification to the six agent task kinds. Before allocating a claim the worker reads `/api/camp/worker/protocol`, selects a supported version and declares its actual task/reference/capability and installed harness support. A protocol 1 server receives the old six-kind/seven-capability declaration without v2 harness fields. A missing discovery endpoint, unknown version or missing capability for an offered task stops new allocation with a diagnostic. A specialized worker leaves known task kinds it does not offer for another worker and remains idle; with `CAMP_WORKER_ONCE=1` it exits normally. Missing harnesses or capabilities for its own task kind still require an operator correction. Every empty claim clears its unused intent.
 
 When offering agent work, the actual `CAMP_DSH_PLUGIN` directory must contain a valid static `protocol.json` declaration. Preflight only reads that bounded JSON file, without executing plugin JavaScript on the host. Verification-only workers skip this agent check. The maintained declaration is generated from `packages/camp-protocol`:
 
@@ -144,7 +240,7 @@ node packages/dsh-plugin/scripts/protocol-descriptor.mjs
 node packages/dsh-plugin/scripts/protocol-descriptor.mjs --check
 ```
 
-The shared package supplies task/reference names, plan/candidate/report validation and all twelve model-facing tool schemas. Runtime installation and the baked-image recipe copy both the plugin and the dependency-free protocol source, to `/opt/camp-dsh-plugin` and `/opt/camp-protocol`. Their relative imports work without a host workspace symlink or package installation in the agent. The worker injects the run's selected `CAMP_PROTOCOL_VERSION` (`1`, `2` or `3`) with the run credential; plugin tools reject a missing or unsupported run protocol.
+The shared package supplies task/reference names, plan/candidate/report validation and all twelve model-facing tool schemas. Runtime installation and the baked-image recipe copy both the plugin and the dependency-free protocol source, to `/opt/camp-dsh-plugin` and `/opt/camp-protocol`. Their relative imports work without a host workspace symlink or package installation in the agent. The worker injects the run's selected `CAMP_PROTOCOL_VERSION` (`1`–`4`) with the run credential; plugin tools reject a missing or unsupported run protocol.
 
 Each new run freezes its selected version, original offered declaration and exact task requirements in `workerProtocol`. The worker checks that snapshot against its explicit input and current capabilities before launching DSH. An old unversioned or unknown run can be retained and recovered, but is not interpreted as a new supported execution. Capability declarations detect old packages and deployment drift; they are self-reported compatibility data, not attestation or authority to bypass server permissions.
 

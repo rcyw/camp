@@ -7713,10 +7713,11 @@ export const campRooms = pgTable("camp_rooms", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   reconciledAt: timestamp("reconciled_at", { withTimezone: true }),
   verificationPolicy: jsonb("verification_policy").$type<import("../services/camp/types").CampVerificationPolicySnapshot>(),
+  storageId: text("storage_id"),
   acceptedRevision: integer("accepted_revision").notNull().default(0),
   acceptedGoalId: uuid("accepted_goal_id").references((): AnyPgColumn => campGoals.id, { onDelete: "set null" }),
   acceptedCandidate: jsonb("accepted_candidate").$type<import("../services/camp/types").CampCandidate>(),
-}, t => [uniqueIndex("camp_rooms_channel").on(t.channelId), index("camp_rooms_server").on(t.serverId)]);
+}, t => [uniqueIndex("camp_rooms_channel").on(t.channelId), index("camp_rooms_server").on(t.serverId), check("camp_rooms_storage_id", sql`${t.storageId} IS NULL OR ${t.storageId} ~ '^[a-f0-9]{64}$'`)]);
 
 export const campGoals = pgTable("camp_goals", {
   id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
@@ -7727,7 +7728,8 @@ export const campGoals = pgTable("camp_goals", {
   initialDependsOn: jsonb("initial_depends_on").$type<string[]>().notNull().default([]),
   workflow: text("workflow", { enum: ["legacy", "serial"] }).notNull().default("legacy"),
   protocolVersion: integer("protocol_version"),
-  planMode: text("plan_mode", { enum: ["sequential", "same_baseline_pair"] }).notNull().default("sequential"),
+  planMode: text("plan_mode", { enum: ["sequential", "same_baseline_pair", "parallel_pair"] }).notNull().default("sequential"),
+  executionPool: jsonb("execution_pool").$type<import("../../../camp-protocol/src/index.js").CampExecutionPool>(),
   integrationInspectionRequired: boolean("integration_inspection_required").notNull().default(false),
   reviewedItems: jsonb("reviewed_items").$type<Record<string, import("../services/camp/types").CampReviewedItem>>().notNull().default({}),
   verificationPolicy: jsonb("verification_policy").$type<import("../services/camp/types").CampVerificationPolicySnapshot>(),
@@ -7750,7 +7752,7 @@ export const campGoals = pgTable("camp_goals", {
   startedAt: timestamp("started_at", { withTimezone: true }),
   deadlineAt: timestamp("deadline_at", { withTimezone: true }),
   completedAt: timestamp("completed_at", { withTimezone: true }),
-}, t => [index("camp_goals_room_status").on(t.roomId, t.status), check("camp_goals_counts", sql`${t.attempt} > 0 AND ${t.runCount} >= 0 AND ${t.reviewRounds} >= 0`), check("camp_goals_protocol_version_positive", sql`${t.protocolVersion} IS NULL OR ${t.protocolVersion} > 0`), check("camp_goals_verification_repairs_nonnegative", sql`${t.verificationRepairs} >= 0`), check("camp_goals_integration_inspection_pair", sql`NOT ${t.integrationInspectionRequired} OR ${t.planMode} = 'same_baseline_pair'`), check("camp_goals_plan_mode", sql`${t.planMode} IN ('sequential','same_baseline_pair') AND (${t.planMode} <> 'same_baseline_pair' OR (${t.workflow} = 'serial' AND ${t.protocolVersion} = 3)) AND (${t.protocolVersion} IS DISTINCT FROM 3 OR ${t.planMode} = 'same_baseline_pair')`), check("camp_goals_reviewed_items", sql`jsonb_typeof(${t.reviewedItems}) = 'object' AND octet_length(${t.reviewedItems}::text) <= 65536`)]);
+}, t => [index("camp_goals_room_status").on(t.roomId, t.status), check("camp_goals_counts", sql`${t.attempt} > 0 AND ${t.runCount} >= 0 AND ${t.reviewRounds} >= 0`), check("camp_goals_protocol_version_positive", sql`${t.protocolVersion} IS NULL OR ${t.protocolVersion} > 0`), check("camp_goals_verification_repairs_nonnegative", sql`${t.verificationRepairs} >= 0`), check("camp_goals_integration_inspection_pair", sql`NOT ${t.integrationInspectionRequired} OR ${t.planMode} IN ('same_baseline_pair','parallel_pair')`), check("camp_goals_plan_mode", sql`${t.planMode} IN ('sequential','same_baseline_pair','parallel_pair') AND (${t.planMode} <> 'same_baseline_pair' OR (${t.workflow} = 'serial' AND ${t.protocolVersion} = 3)) AND (${t.planMode} <> 'parallel_pair' OR (${t.workflow} = 'serial' AND ${t.protocolVersion} = 4)) AND (${t.protocolVersion} IS DISTINCT FROM 3 OR ${t.planMode} = 'same_baseline_pair') AND (${t.protocolVersion} IS DISTINCT FROM 4 OR ${t.planMode} = 'parallel_pair')`), check("camp_goals_execution_pool", sql`${t.executionPool} IS NULL OR (${t.protocolVersion} = 4 AND jsonb_typeof(${t.executionPool}) = 'object' AND octet_length(${t.executionPool}::text) <= 8192)`), check("camp_goals_reviewed_items", sql`jsonb_typeof(${t.reviewedItems}) = 'object' AND octet_length(${t.reviewedItems}::text) <= 65536`)]);
 
 export const campTasks = pgTable("camp_tasks", {
   taskId: uuid("task_id").primaryKey().references(() => tasks.id, { onDelete: "cascade" }),

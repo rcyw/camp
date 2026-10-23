@@ -31,21 +31,23 @@ async function assertProjectIdentity(project, source, imageId) {
 /** Local Linux runtime. Long-lived worker secrets never enter its run descriptors. */
 export class CampRuntime {
   constructor(options = {}) {
-    this.home = resolve(options.home ?? process.env.CAMP_RUNTIME_HOME ?? join(PACKAGE, '.local/state'));
-    const source = options.layerfsSource ?? process.env.LAYERFS_SOURCE;
+    const env = options.env ?? process.env;
+    this.home = resolve(options.home ?? env.CAMP_RUNTIME_HOME ?? join(PACKAGE, '.local/state'));
+    const source = options.layerfsSource ?? env.LAYERFS_SOURCE;
     this.source = source ? resolve(source) : null;
-    this.toolchainBundle = options.toolchainBundle ?? process.env.CAMP_TOOLCHAIN_BUNDLE ?? (source ? null : defaultBundle);
+    this.toolchainBundle = options.toolchainBundle ?? env.CAMP_TOOLCHAIN_BUNDLE ?? (source ? null : defaultBundle);
     const paths = this.toolchainBundle ? bundlePaths(this.toolchainBundle) : null;
     this.sdkEntry = paths?.sdkEntry ?? join(this.source, 'sdk/js/src/index.js');
     this.native = resolve(options.native ?? paths?.native ?? join(PACKAGE, '.local/layerfs/layerfs.node'));
     this.daemon = resolve(options.daemon ?? paths?.daemon ?? join(PACKAGE, '.local/layerfs/layerfs-daemon'));
-    this.imageId = options.imageId ?? process.env.CAMP_RUNTIME_IMAGE;
+    this.imageId = options.imageId ?? env.CAMP_RUNTIME_IMAGE;
     this.docker = options.docker ?? '/var/run/docker.sock';
-    this.dshArchive = options.dshArchive ?? process.env.CAMP_DSH_ARCHIVE ?? paths?.dshArchive ?? join(PACKAGE, '.local/dsh-runtime.tar');
+    this.dshArchive = options.dshArchive ?? env.CAMP_DSH_ARCHIVE ?? paths?.dshArchive ?? join(PACKAGE, '.local/dsh-runtime.tar');
     this.projects = new Map();
     // Defer validation until new execution so a bad replacement policy cannot
     // prevent recovery and cleanup of an already recorded attempt.
     this.resourcePolicy = options.resources ?? null;
+    this.admission = options.admission ?? null;
   }
 
   async sdkConfig(config) {
@@ -86,6 +88,10 @@ export class CampRuntime {
 
   async dockerCall(args, options = {}) {
     return execute('docker', ['-H', `unix://${this.docker}`, ...args], { timeout: 30_000, maxBuffer: 4 * 1024 * 1024, ...options });
+  }
+
+  async createOwnedContainer(prefix, create) {
+    return this.admission ? this.admission.withContainer(prefix, create) : create();
   }
 
   async sdk(project, method, args = [], config = project, { signal } = {}) {
@@ -194,11 +200,15 @@ export class CampRuntime {
       await this.sdk(selected, 'branch.fork', [branch, baseRef], config, { signal });
       intent.phase = 'mounting';
       await save(join(folder, 'prepare.json'), intent);
-      const workspace = await this.sdk(selected, 'workspace.mount', [branch], config, { signal });
+      const mounted = await this.createOwnedContainer(config.prefix, async () => {
+        const workspace = await this.sdk(selected, 'workspace.mount', [branch], config, { signal });
+        const containerId = (await this.dockerCall(['inspect', '--format', '{{.Id}}', `${config.prefix}${selected.projectId}-${workspace.sandbox}`], { signal })).stdout.trim();
+        const resourceReceipt = await enforceAgentPolicy(this, containerId, resources, { signal });
+        return { workspace, containerId, resourceReceipt };
+      });
+      const { workspace, containerId, resourceReceipt } = mounted;
       Object.assign(intent, { phase: 'mounted', workspace });
       await save(join(folder, 'prepare.json'), intent);
-      const containerId = (await this.dockerCall(['inspect', '--format', '{{.Id}}', `${config.prefix}${selected.projectId}-${workspace.sandbox}`], { signal })).stdout.trim();
-      const resourceReceipt = await enforceAgentPolicy(this, containerId, resources, { signal });
       await save(join(folder, 'resource-policy.json'), resourceReceipt);
       const run = { projectId: selected.projectId, externalProjectId: selected.externalId, runId, roleId, branch, baseRef, mountRoot: workspace.root, mountBase: workspace.base, sandboxId: workspace.sandbox, containerId, workspacePath: workspace.path, imageId: workspace.image, config, folder, owner, profile: 'Disposable' };
       await save(join(folder, 'run.json'), run);

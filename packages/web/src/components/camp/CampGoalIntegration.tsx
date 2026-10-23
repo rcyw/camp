@@ -3,9 +3,10 @@ import type { MessageId } from "../../i18n/messages/en";
 import type { CampCandidate, CampGoal, CampIntegrationOperation } from "./campApi";
 import CampCandidateReference from "./CampCandidateReference";
 import { visibleSourceText } from "./campDisplay";
+import { hasSharedBaseline } from "./campPlanMode";
 
 const STATUS_LABELS: Record<string, MessageId> = {
-  not_required: "camp.integration.status.not_required", pending: "camp.integration.status.pending",
+  not_required: "camp.integration.status.not_required", not_run: "camp.integration.status.not_run", pending: "camp.integration.status.pending",
   queued: "camp.integration.status.queued", running: "camp.integration.status.running",
   merged: "camp.integration.status.merged", conflict: "camp.integration.status.conflict",
   rejected: "camp.integration.status.rejected", failed: "camp.integration.status.failed",
@@ -73,17 +74,17 @@ function IntegrationOperation({ operation }: { operation: CampIntegrationOperati
 export default function CampGoalIntegration({ goal, history = [] }: { goal: CampGoal; history?: CampIntegrationOperation[] }) {
   const { formatMessage: t } = useIntl();
   const integration = goal.integration;
-  if (!integration?.required && goal.planMode !== "same_baseline_pair") return null;
+  if (!integration?.required && !hasSharedBaseline(goal.planMode)) return null;
   const status = integration?.status ?? "pending", operations = (integration?.operations ?? []).filter(operation => operation.goalAttempt === goal.attempt);
   const previous = history.filter(operation => operation.goalId === goal.id && operation.goalAttempt !== goal.attempt);
   return <section className="rounded-lg border border-border-default p-4" aria-label={t({ id: "camp.integration.title" })} data-testid="camp-goal-integration" data-status={status}>
     <h5 className="text-sm font-medium">{t({ id: "camp.integration.title" })}</h5>
     <p className="mt-2 text-sm font-medium" role="status">{t({ id: statusLabel(status) })}</p>
     <p className="mt-2 text-xs text-foreground-hint">{t({ id: "camp.integration.scope" })}</p>
-    {operations.length === 0 && <p className="mt-2 text-sm text-foreground-hint">{t({ id: "camp.integration.waitingParents" })}</p>}
+    {operations.length === 0 && <p className="mt-2 text-sm text-foreground-hint">{t({ id: status === "not_run" ? "camp.integration.notRunHelp" : "camp.integration.waitingParents" })}</p>}
     {status === "blocked" && <p className="mt-2 text-sm text-foreground-secondary">{t({ id: "camp.integration.blockedHelp" })}</p>}
     {operations.length > 0 && <ol className="mt-3 flex flex-col gap-3">{operations.map(operation => <IntegrationOperation key={operation.id} operation={operation} />)}</ol>}
     {previous.length > 0 && <details className="mt-3" data-testid="camp-integration-history"><summary className="cursor-pointer text-xs font-medium">{t({ id: "camp.integration.history" }, { count: previous.length })}</summary><ol className="mt-3 flex flex-col gap-3">{previous.map(operation => <IntegrationOperation key={operation.id} operation={operation} />)}</ol></details>}
-    <p className="mt-3 text-xs text-foreground-hint">{t({ id: "camp.integration.recoveryHelp" })}</p>
+    {status !== "not_run" && <p className="mt-3 text-xs text-foreground-hint">{t({ id: "camp.integration.recoveryHelp" })}</p>}
   </section>;
 }

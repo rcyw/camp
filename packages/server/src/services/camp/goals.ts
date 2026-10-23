@@ -1,3 +1,4 @@
+import { roomOccupancy } from "./executionPool";
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import { getDb, type DatabaseExecutor } from "../../db/index";
 import { campEvents, campGoals, campOperations, campQuestions, campRooms, campRuns, campTasks, tasks } from "../../db/schema";
@@ -109,6 +110,7 @@ export async function goalSnapshots(roomId: string, administrator: boolean, canP
   const active = await getDb().select({ goalId: sql<string>`coalesce(${campTasks.goalId}, ${campOperations.goalId})`, goalAttempt: sql<number>`coalesce(${campTasks.goalAttempt}, ${campOperations.goalAttempt})` }).from(campRuns).leftJoin(campTasks, eq(campTasks.taskId, campRuns.taskId)).leftJoin(campOperations, eq(campOperations.id, campRuns.operationId))
     .where(and(eq(campRuns.roomId, roomId), eq(campRuns.status, "running")));
   const [room] = await getDb().select().from(campRooms).where(eq(campRooms.id, roomId));
+  const cleanupPending = (await roomOccupancy(getDb(), roomId)).some(run => run.status !== "running");
   const byAttempt = new Map<string, Awaited<ReturnType<typeof operationSnapshots>>>();
   for (const operation of operations ?? await operationSnapshots(roomId)) {
     const key = `${operation.goalId}:${operation.goalAttempt}`;
@@ -122,7 +124,7 @@ export async function goalSnapshots(roomId: string, administrator: boolean, canP
     const verification = await goalVerificationSnapshot(goal, goalOperations);
     const resultReady = await deliveryResultReady(goal, goalOperations);
     return { ...goal, verification, integration: await goalIntegrationSnapshot(goal, goalOperations), resultReady, ...await goalDeliverySnapshot(goal, canPost), usage: { runs: goal.runCount, reviewRounds: goal.reviewRounds, elapsedSeconds }, activeRuns,
-      canRetry: administrator && !goal.integrationInspectionRequired && goal.reason !== "integration_inspection_required" && goal.attempt < 100 && activeRuns === 0 && !otherActive && (goal.workflow !== "serial" || goal.baseHeadRevision === room.acceptedRevision) && ["needs_attention", "cancelled"].includes(goal.status),
+      canRetry: administrator && !cleanupPending && !goal.integrationInspectionRequired && goal.reason !== "integration_inspection_required" && goal.attempt < 100 && activeRuns === 0 && !otherActive && (goal.workflow !== "serial" || goal.baseHeadRevision === room.acceptedRevision) && ["needs_attention", "cancelled"].includes(goal.status),
       canCancel: administrator && ["queued", "running", "waiting_question"].includes(goal.status) };
   }));
 }

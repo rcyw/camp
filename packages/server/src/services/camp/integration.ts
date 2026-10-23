@@ -11,7 +11,7 @@ import { CampError, type CampPlanItem, type CampReviewedItem } from "./types";
 type Goal = typeof campGoals.$inferSelect;
 type Operation = typeof campOperations.$inferSelect;
 type Room = typeof campRooms.$inferSelect;
-export const needsIntegration = (goal: Pick<Goal, "planMode">) => goal.planMode === "same_baseline_pair";
+export const needsIntegration = (goal: Pick<Goal, "planMode">) => ["same_baseline_pair", "parallel_pair"].includes(goal.planMode);
 
 /** The reviewer cannot choose a producer. Follow the canonical task dependency
  * and require the exact completed build which produced its selected input. */
@@ -26,7 +26,7 @@ export async function recordReviewedItem(tx: DatabaseExecutor, goal: Goal, bindi
   return reviewedItems;
 }
 export async function enqueueIntegration(tx: DatabaseExecutor, room: Room, goal: Goal, items: CampPlanItem[], reviewedItems: Record<string, CampReviewedItem>) {
-  if (!needsIntegration(goal) || goal.protocolVersion !== 3 || items.length !== 2 || !goal.baseCandidate || items.some(item => !reviewedItems[item.key])) throw new CampError(409, "integration_parents_required", "Both ordered items must have reviewed immutable producers");
+  if (!needsIntegration(goal) || ![3, 4].includes(goal.protocolVersion ?? 0) || items.length !== 2 || !goal.baseCandidate || items.some(item => !reviewedItems[item.key])) throw new CampError(409, "integration_parents_required", "Both ordered items must have reviewed immutable producers");
   if (goal.runCount >= goal.budget.maxRuns) { await stopGoal(tx, room, goal, "run_budget_exhausted"); return; }
   const input = parseIntegrationInput({ schemaVersion: 1, algorithm: "layerfs-three-way-v1", policy: "reject-overlap-v1", base: goal.baseCandidate, parents: items.map(item => { const { key, runId, epoch, candidate } = reviewedItems[item.key]; return { key, runId, epoch, candidate }; }) });
   const inputDigest = createHash("sha256").update(serializeIntegrationInput(input)).digest("hex");
@@ -74,6 +74,7 @@ export async function requireIntegrationGate(tx: DatabaseExecutor, goal: Goal) {
 export async function goalIntegrationSnapshot(goal: Goal, supplied?: readonly (IntegrationGateOperation & { goalId: string })[]) {
   const operations = (supplied ?? await getDb().select().from(campOperations).where(eq(campOperations.goalId, goal.id))).filter(operation => operation.kind === "integration" && operation.goalId === goal.id && operation.goalAttempt === goal.attempt);
   const latest = operations[0];
-  const status = !needsIntegration(goal) ? "not_required" : !latest ? "pending" : latest.status === "completed" ? latest.integrationReport?.status ?? "failed" : latest.status;
+  const stoppedWithoutExecution = !latest && ["completed", "cancelled", "needs_attention"].includes(goal.status);
+  const status = !needsIntegration(goal) ? "not_required" : !latest ? stoppedWithoutExecution ? "not_run" : "pending" : latest.status === "completed" ? latest.integrationReport?.status ?? "failed" : latest.status;
   return { required: needsIntegration(goal), status, operations };
 }

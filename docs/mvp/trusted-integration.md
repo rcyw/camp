@@ -6,7 +6,7 @@
 
 Room 快照的 `supportedPlanModes` 广告可用模式，旧服务没有该字段时界面只提供逐项模式。提交沿用 `POST /api/camp/rooms/:roomId/tasks`，可增加 `planMode: "same_baseline_pair"`。模式在 Goal 创建时固定，人工重试不能替换模式、基线或检查策略。
 
-Worker、插件和共享包为 0.5.0，支持执行协议 1/2/3。普通新串行目标继续冻结协议 2，双候选目标固定协议 3；旧目标及其原始 outbox 保持原契约。领取前检查协议、任务与能力，只有协议 2 的 Worker 对双候选目标零分配、零预算。新 Worker 连接旧 v1/v2 服务时缩减实际声明。模型插件仅广告六类模型任务，不再声明系统验证或可信集成权限。
+本记录对应 Worker、插件和共享包 0.5.0，支持执行协议 1/2/3。当前 0.6.0 双事项并行和协议 4 另见 [有界并行执行](./bounded-pair-execution.md)。普通新串行目标继续冻结协议 2，依次执行的双候选目标固定协议 3；旧目标及其原始 outbox 保持原契约。领取前检查协议、任务与能力，只有协议 2 的 Worker 对双候选目标零分配、零预算。新 Worker 连接旧 v1/v2 服务时缩减实际声明。模型插件仅声明六类模型任务，不声明系统验证或可信集成权限。
 
 流程如下：
 
@@ -118,7 +118,7 @@ node scripts/mvp/integration-model-smoke.mjs --real-model
 
 新镜像精确 ID 为 `sha256:09686b9d69370224848ccacdfe8ee4a77e964b928dfc58e8c8f6ed653a5772fa`，bundle 摘要为 `e02ceca0133eccbd44622ce90136824783976bd741ce6b69647eba8473bd8675`。它们没有替换原项目镜像或旧 bundle。
 
-本机常驻 Worker 已连接真实双候选演示 Room，0.5.0 新 bundle/镜像预检通过；原 Room、候选与配置仍保留。演示入口为 `.camp/active-demo.json`，切换前配置为 `.camp/worker.before-integration.env`。迁移 0381/0382 均事务应用，既有执行事实和记录行数保持不变；0382 根据明确既有事实回填了一项检查标记，没有伪造历史迁移台账。
+本阶段验收时常驻 Worker 连接真实双候选演示 Room，0.5.0 bundle/镜像预检通过。当前入口以 `.camp/active-demo.json` 为准；后续切换到 0.6.0 并行池前的本阶段配置保存在 `.camp/worker.before-parallel.env`，Room、候选与原回执仍保留。迁移 0381/0382 均事务应用，既有执行事实和记录行数保持不变；0382 根据明确既有事实回填了一项检查标记，没有伪造历史迁移台账。
 
 ## 后续阶段
 
